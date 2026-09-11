@@ -50,6 +50,43 @@ final class PiBridgeServerTests: XCTestCase {
         XCTAssertTrue(bridge.handle(line: #"{"op":"source","cell":"c1","source":"write(\"x\");\nwrite(\"y\");\n","final":true}"#).isEmpty)
     }
 
+    func testFinalFeedReportsAttemptedStatementAndKeepsEarlierEffect() throws {
+        let bridge = OpenComputerUsePiBridgeServer()
+        let source = "globalThis.sent = 1;\nthrow new Error('stop');\nglobalThis.sent = 2;"
+        let request = try JSONSerialization.data(withJSONObject: [
+            "op": "source", "cell": "failed", "source": source, "final": true,
+        ])
+        let frames = bridge.handle(line: String(decoding: request, as: UTF8.self)).map(decode)
+        let started = frames.filter { $0["type"] as? String == "started" }
+        XCTAssertEqual(started.count, 2)
+        XCTAssertTrue((started.last?["text"] as? String ?? "").contains("throw new Error"))
+        XCTAssertEqual(frames.filter { $0["type"] as? String == "done" }.count, 1)
+        XCTAssertEqual(frames.last?["status"] as? String, "failed")
+        let read = bridge.handle(line: #"{"op":"source","cell":"read","source":"write(globalThis.sent);","final":true}"#).map(decode)
+        XCTAssertEqual(read.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
+    }
+
+    func testIfAndTryBodiesWaitForTheirContinuation() throws {
+        for (head, tail) in [
+            ("if (true) { globalThis.ran += 1; }\n// branch follows\n", "else { globalThis.ran += 10; };\n"),
+            ("try { globalThis.ran += 1; }\n", "catch (e) { globalThis.ran += 10; };\n"),
+        ] {
+            let bridge = OpenComputerUsePiBridgeServer()
+            func feed(_ source: String, final: Bool) throws -> [[String: Any]] {
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "op": "source", "cell": "control", "source": source, "final": final,
+                ])
+                return bridge.handle(line: String(decoding: data, as: UTF8.self)).map(decode)
+            }
+            let prefix = "globalThis.ran = 0;\n" + head
+            let early = try feed(prefix, final: false)
+            XCTAssertEqual(early.filter { $0["type"] as? String == "done" }.count, 1)
+            let final = try feed(prefix + tail + "write(globalThis.ran);", final: true)
+            XCTAssertEqual(final.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
+            XCTAssertEqual(final.last?["status"] as? String, "done")
+        }
+    }
+
     func testMalformedIgnored() {
         let bridge = OpenComputerUsePiBridgeServer()
         XCTAssertTrue(bridge.handle(line: "not json").isEmpty)

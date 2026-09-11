@@ -181,7 +181,8 @@ enum SnapshotBuilder {
         for app: RunningAppDescriptor,
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
-        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation
+        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
+        windowID: CGWindowID? = nil
     ) throws -> AppSnapshot {
         if app.name == FixtureBridge.appName, let fixtureState = try FixtureBridge.readState() {
             return buildFixtureSnapshot(app: app, state: fixtureState)
@@ -205,6 +206,12 @@ enum SnapshotBuilder {
             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
         }
 
+        if let windowID {
+            guard let named = windowElement(for: windowID, appElement: appElement) else {
+                throw ComputerUseError.stateUnavailable("window_id \(windowID) no longer exists")
+            }
+            focusedWindow = named
+        }
         var rootWindow: AXUIElement
         guard let resolvedFocusedWindow = focusedWindow else {
             throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
@@ -217,7 +224,7 @@ enum SnapshotBuilder {
         // the title/area heuristics remain the fallback.
         var windowCapture = TimingLog.measure("snapshot.window_capture") {
             WindowCapture.resolve(for: app.pid, exactWindowID: SkyLightSPI.shared.windowID(for: rootWindow))
-                ?? WindowCapture.resolve(for: app.pid, titleHint: windowTitle)
+                ?? (windowID == nil ? WindowCapture.resolve(for: app.pid, titleHint: windowTitle) : nil)
         }
         if windowCapture == nil,
            recoveryPolicy == .allowActivation,
@@ -2263,4 +2270,389 @@ private extension CGRect {
     var renderedLocalFrame: String {
         "x=\(Int(origin.x)), y=\(Int(origin.y)), w=\(Int(width)), h=\(Int(height))"
     }
+}
+
+// MARK: - Targeted AX lookup (no snapshot / screenshot)
+//
+// Backs `cua.query` and the snapshot-free JavaScript action path
+// (docs/product-specs/targeted-ax-speculative-execution.md). Lookup uses the
+// app's native `AXUIElementsForSearchPredicate` where supported, and a bounded
+// child traversal (default 500 nodes, `max_nodes`) otherwise. Neither renders a
+// tree, captures a screenshot, or reads snapshotsByApp, so a control introduced
+// by a previous action is findable even though it was absent from the last full
+// snapshot.
+
+enum TargetedAX {
+    struct Criteria {
+        var text: String?
+        var exact: Bool
+        var role: String?
+        var limit: Int
+        var maxNodes: Int
+    }
+
+    struct WindowContext {
+        let app: RunningAppDescriptor
+        let appElement: AXUIElement
+        let windowElement: AXUIElement
+        let windowID: CGWindowID?
+        let windowLayer: Int?
+        let windowBounds: CGRect?
+        let focusedElement: AXUIElement?
+    }
+
+    struct SearchResult {
+        let records: [ElementRecord]
+        /// True when the bounded traversal hit its node cap before exhausting the
+        /// window subtree, so absence of a match is not conclusive.
+        let capped: Bool
+    }
+}
+
+extension WindowCapture {
+    struct Metadata {
+        let windowID: CGWindowID
+        let layer: Int
+        let bounds: CGRect
+    }
+
+    /// Window geometry only — no pixel capture — so the targeted path never
+    /// triggers a screenshot.
+    static func resolveMetadata(for pid: pid_t, exactWindowID: CGWindowID?) -> Metadata? {
+        guard let exactWindowID,
+              let infoList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return nil
+        }
+        for info in infoList {
+            guard
+                let number = info[kCGWindowNumber as String] as? NSNumber, number.uint32Value == exactWindowID,
+                let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
+                let layer = info[kCGWindowLayer as String] as? Int,
+                let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                let bounds = CGRect(dictionaryRepresentation: boundsDictionary), !bounds.isEmpty
+            else {
+                continue
+            }
+            return Metadata(windowID: exactWindowID, layer: layer, bounds: bounds)
+        }
+        return nil
+    }
+
+    static func resolveMetadata(for pid: pid_t, titleHint: String?) -> Metadata? {
+        for options in [CGWindowListOption.optionOnScreenOnly, CGWindowListOption.optionAll] {
+            guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+                continue
+            }
+            let candidates = infoList.enumerated().compactMap { offset, info -> WindowCaptureCandidate? in
+                guard
+                    let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
+                    let number = info[kCGWindowNumber as String] as? NSNumber,
+                    let layer = info[kCGWindowLayer as String] as? Int,
+                    let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                    let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
+                else {
+                    return nil
+                }
+                return WindowCaptureCandidate(
+                    windowID: CGWindowID(number.uint32Value),
+                    layer: layer,
+                    bounds: bounds,
+                    title: info[kCGWindowName as String] as? String,
+                    area: Int(bounds.width * bounds.height),
+                    frontToBackIndex: offset
+                )
+            }
+            if let best = preferredWindowCaptureCandidate(candidates, titleHint: titleHint) {
+                return Metadata(windowID: best.windowID, layer: best.layer, bounds: best.bounds)
+            }
+        }
+        return nil
+    }
+}
+
+extension SnapshotBuilder {
+    /// Resolve a target window read-only: no activation, no raise, no screenshot.
+    /// Mirrors the window-finding prologue of `build` without the tree walk or
+    /// capture, so it never redirects input or steals focus. `windowID` selects a
+    /// specific window; otherwise the app's current focused window is used.
+    static func resolveTargetWindow(for app: RunningAppDescriptor, windowID: CGWindowID? = nil) throws -> TargetedAX.WindowContext {
+        if app.name == FixtureBridge.appName {
+            throw ComputerUseError.message("targeted lookup is not supported for fixture apps")
+        }
+
+        guard PermissionDiagnostics.current().accessibilityTrusted else {
+            throw ComputerUseError.permissionDenied("Accessibility permission is required. Run `open-computer-use doctor` and grant access to Open Computer Use.")
+        }
+
+        let appElement = AXUIElementCreateApplication(app.pid)
+        _ = enableBestEffortAccessibilityModes(appElement)
+        let systemWide = AXUIElementCreateSystemWide()
+        let focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
+
+        let rootWindow: AXUIElement
+        if let windowID, let named = windowElement(for: windowID, appElement: appElement) {
+            rootWindow = named
+        } else if let windowID {
+            throw ComputerUseError.stateUnavailable("window_id \(windowID) is not a current window of \(app.bundleIdentifier ?? app.name).")
+        } else if let focused = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
+            rootWindow = focused
+        } else {
+            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+        }
+
+        let windowTitle = stringValue(of: rootWindow, attribute: kAXTitleAttribute)
+        let axWindowID = SkyLightSPI.shared.windowID(for: rootWindow)
+        let meta = WindowCapture.resolveMetadata(for: app.pid, exactWindowID: axWindowID)
+            ?? WindowCapture.resolveMetadata(for: app.pid, titleHint: windowTitle)
+        let focusedElement = preferredFocusedElement(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
+
+        return TargetedAX.WindowContext(
+            app: app,
+            appElement: appElement,
+            windowElement: rootWindow,
+            windowID: meta?.windowID ?? axWindowID,
+            windowLayer: meta?.layer,
+            windowBounds: meta?.bounds,
+            focusedElement: focusedElement
+        )
+    }
+
+    private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
+        copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
+            SkyLightSPI.shared.windowID(for: $0) == windowID
+        }
+    }
+
+    // Attributes read for every visited node, in one batched IPC call. Position
+    // and size ride along so we can (a) skip descending into off-screen subtrees
+    // and (b) fill the record's frame without another round trip.
+    private static let searchScanAttributes: [String] = [
+        kAXRoleAttribute as String,
+        kAXTitleAttribute as String,
+        kAXDescriptionAttribute as String,
+        kAXValueAttribute as String,
+        kAXIdentifierAttribute as String,
+        kAXPositionAttribute as String,
+        kAXSizeAttribute as String,
+    ]
+
+    /// Find controls in the target window matching `criteria`. Tries the app's
+    /// native `AXUIElementsForSearchPredicate` first (unsupported on many macOS
+    /// builds); otherwise a bounded breadth-first walk that **interleaves matching
+    /// and stops as soon as `limit` matches are found**, and reads all scan
+    /// attributes for a node in a single batched AX call. Records carry live
+    /// AXUIElement references and window-local frames, so the caller can act on
+    /// them without any snapshot.
+    static func targetedSearch(_ criteria: TargetedAX.Criteria, in context: TargetedAX.WindowContext) -> TargetedAX.SearchResult {
+        let limit = max(1, min(criteria.limit, 100))
+        let windowElement = context.windowElement
+
+        // Native optimized search, when the app offers it: results are already the
+        // matching set, so just build records (still stop at `limit`).
+        if let native = predicateSearch(root: windowElement, searchText: criteria.text, resultsLimit: limit * 4) {
+            var records: [ElementRecord] = []
+            for element in native {
+                let scan = batchScan(element)
+                guard targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) else { continue }
+                records.append(makeRecord(element, scan: scan, windowBounds: context.windowBounds))
+                if records.count >= limit { break }
+            }
+            return TargetedAX.SearchResult(records: records, capped: false)
+        }
+
+        // Bounded BFS with interleaved matching and early stop. Off-screen
+        // subtrees are pruned by geometry, which collapses scrolled-away list and
+        // table content that this macOS does not expose via AXVisibleChildren.
+        // The clip rect is the root window's OWN AX frame, captured in this same
+        // pass — so it can never skew against the node frames the way a separately
+        // read CGWindow bounds can when the window moves.
+        let budget = max(1, criteria.maxNodes)
+        let windowBounds = context.windowBounds
+        var clip: CGRect?
+        var records: [ElementRecord] = []
+        var queue: [AXUIElement] = [windowElement]
+        var head = 0
+        var visited = 0
+        var capped = false
+        while head < queue.count {
+            if visited >= budget { capped = true; break }
+            let element = queue[head]
+            head += 1
+            visited += 1
+
+            let scan = batchScan(element)
+
+            if visited == 1 {
+                // The window itself is the clip; never prune it.
+                clip = scan.globalFrame
+            } else if let clip, let frame = scan.globalFrame, !frame.intersects(clip) {
+                // Scrolled or clipped away: not actionable, and neither are its
+                // descendants — skip the whole branch. Unknown frame → keep.
+                continue
+            }
+
+            if targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) {
+                records.append(makeRecord(element, scan: scan, windowBounds: windowBounds))
+                if records.count >= limit { capped = false; break }
+            }
+
+            queue.append(contentsOf: searchChildren(of: element, role: scan.role))
+        }
+        return TargetedAX.SearchResult(records: records, capped: capped)
+    }
+
+    // Roles whose children are a potentially huge row set (file lists, tables,
+    // message lists). For these, walk only the on-screen subset — that is what a
+    // user can act on now — so the search does not drown in off-screen rows.
+    private static let largeContainerRoles: Set<String> = [
+        kAXTableRole as String, kAXOutlineRole as String, kAXListRole as String,
+        "AXBrowser", "AXCollection", "AXGrid",
+    ]
+
+    private static func searchChildren(of element: AXUIElement, role: String?) -> [AXUIElement] {
+        if let role, largeContainerRoles.contains(role),
+           let visible = copyArray(element, attribute: axVisibleChildrenAttribute), !visible.isEmpty {
+            return visible
+        }
+        return copyArray(element, attribute: kAXChildrenAttribute) ?? []
+    }
+
+    private struct NodeScan {
+        let role: String?
+        let title: String?
+        let description: String?
+        let value: String?
+        let identifier: String?
+        let globalFrame: CGRect?
+    }
+
+    /// Read the scan attributes in a single `AXUIElementCopyMultipleAttributeValues`
+    /// IPC call (falls back to individual reads if the batch call is unsupported).
+    private static func batchScan(_ element: AXUIElement) -> NodeScan {
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            element,
+            searchScanAttributes as CFArray,
+            AXCopyMultipleAttributeOptions(),
+            &values
+        )
+        let raw: [AnyObject]
+        if error == .success, let array = values as? [AnyObject], array.count == searchScanAttributes.count {
+            raw = array
+        } else {
+            raw = searchScanAttributes.map { attribute -> AnyObject in
+                var v: CFTypeRef?
+                _ = AXUIElementCopyAttributeValue(element, attribute as CFString, &v)
+                return v ?? (NSNull() as AnyObject)
+            }
+        }
+        func str(_ i: Int) -> String? { raw[i] as? String }
+        return NodeScan(
+            role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),
+            globalFrame: axFrame(position: raw[5], size: raw[6])
+        )
+    }
+
+    private static func axFrame(position: AnyObject?, size: AnyObject?) -> CGRect? {
+        guard let position, let size,
+              CFGetTypeID(position as CFTypeRef) == AXValueGetTypeID(),
+              CFGetTypeID(size as CFTypeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+        var point = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else {
+            return nil
+        }
+        return CGRect(origin: point, size: extent)
+    }
+
+    private static func makeRecord(_ element: AXUIElement, scan: NodeScan, windowBounds: CGRect?) -> ElementRecord {
+        let rawActions = copyActions(element) ?? []
+        // Reuse the frame from the batched scan; window-relative when we have bounds.
+        let localFrame: CGRect?
+        if let frame = scan.globalFrame {
+            localFrame = windowBounds.map { windowRelativeFrame(elementFrame: frame, windowBounds: $0) } ?? frame
+        } else {
+            localFrame = resolveLocalFrame(of: element, windowBounds: windowBounds)
+        }
+        return ElementRecord(
+            index: 0, // reassigned by the caller when registered
+            identifier: displayIdentifier(scan.identifier),
+            element: element,
+            localFrame: localFrame,
+            role: scan.role,
+            title: scan.title ?? scan.description,
+            value: scan.value.map { $0.count > defaultTextLimit ? String($0.prefix(defaultTextLimit)) : $0 },
+            rawActions: rawActions,
+            prettyActions: scan.role.map { meaningfulActions(rawActions, role: $0) } ?? rawActions
+        )
+    }
+
+    /// Native optimized search via the app's `AXUIElementsForSearchPredicate`
+    /// parameterized attribute (as Accessibility Inspector uses). Returns nil when
+    /// the app does not support it, so the caller can fall back to traversal.
+    private static func predicateSearch(root: AXUIElement, searchText: String?, resultsLimit: Int) -> [AXUIElement]? {
+        var parameters: [String: Any] = [
+            "AXSearchKey": "AXAnyTypeSearchKey",
+            "AXResultsLimit": resultsLimit,
+            "AXImmediateDescendantsOnly": false,
+            "AXVisibleOnly": false,
+        ]
+        if let searchText, !searchText.isEmpty {
+            parameters["AXSearchText"] = searchText
+        }
+
+        var result: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(
+            root,
+            "AXUIElementsForSearchPredicate" as CFString,
+            parameters as CFDictionary,
+            &result
+        )
+        guard error == .success, let elements = result as? [AXUIElement] else {
+            return nil
+        }
+        return elements
+    }
+}
+
+/// Pure record filter, factored out so it is unit-testable without a live
+/// accessibility tree. `text` matches title/description/value (substring, or a
+/// full match when `exact`); `role` matches the AX role (the AX prefix optional).
+func targetedRecordMatches(
+    _ criteria: TargetedAX.Criteria,
+    role: String?,
+    title: String?,
+    description: String?,
+    value: String?
+) -> Bool {
+    if let wantedRole = criteria.role, !targetedRoleEquals(role, wantedRole) {
+        return false
+    }
+    if let wantedText = criteria.text, !wantedText.isEmpty {
+        let fields = [title, description, value]
+        let hit = fields.contains { field in
+            guard let field else { return false }
+            if criteria.exact {
+                return field.caseInsensitiveCompare(wantedText) == .orderedSame
+            }
+            return field.range(of: wantedText, options: .caseInsensitive) != nil
+        }
+        if !hit { return false }
+    }
+    return true
+}
+
+/// Role match tolerant of the `AX` prefix ("button" matches "AXButton").
+func targetedRoleEquals(_ actual: String?, _ wanted: String) -> Bool {
+    guard let actual else { return false }
+    func normalize(_ s: String) -> String {
+        var r = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if r.hasPrefix("ax") { r.removeFirst(2) }
+        return r
+    }
+    return normalize(actual) == normalize(wanted)
 }

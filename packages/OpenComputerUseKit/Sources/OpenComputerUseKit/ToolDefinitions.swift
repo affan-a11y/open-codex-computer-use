@@ -161,6 +161,26 @@ public enum ToolDefinitions {
                 required: ["app", "text"]
             )
         ),
+        ToolDefinition(
+            name: "query",
+            description: "Targeted accessibility lookup: find controls in the app's chosen window using native AX search, with no full snapshot or screenshot. Returns matching controls, each with an `index` usable by the element actions (click, set_value, scroll, perform_secondary_action). Requires text and/or role. This tool is part of plugin `Computer Use`.",
+            annotations: readOnlyAnnotations(),
+            inputSchema: objectSchema(
+                properties: [
+                    "app": stringProperty(description: "App name or bundle identifier"),
+                    "text": stringProperty(description: "Match text in the control's title, description or value. Case-insensitive substring unless exact is true."),
+                    "role": stringProperty(description: "Match this accessibility role (the AX prefix is optional, e.g. button or AXButton)"),
+                    "exact": [
+                        "type": "boolean",
+                        "description": "Require a complete text match instead of a substring. Defaults to false.",
+                    ],
+                    "limit": positiveIntegerProperty(description: "Maximum matches to return. Defaults to 20."),
+                    "max_nodes": positiveIntegerProperty(description: "Node cap for the fallback traversal when the app has no native search. Defaults to 500."),
+                    "window_id": numberProperty(description: "Search this specific window (CGWindowID) instead of the app's current window."),
+                ],
+                required: ["app"]
+            )
+        ),
     ]
 
     /// The only tool advertised over MCP. Every action is reachable from inside
@@ -218,6 +238,17 @@ Actions (each throws on a tool error; catch with try/catch):
   cua.secondaryAction(app, element_index, action)
   cua.listApps()
   cua.call(tool, args)       // low-level escape hatch: returns { text, images }
+
+Speculative path: predict several steps per call. query() finds controls with a \
+native AX search and NO snapshot or screenshot, returning an `index` you pass to \
+the ordinary actions. Under js, actions do not auto-capture state, so a burst \
+runs without a snapshot between steps; call getState/getAppState only when you \
+must read a result back.
+  cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
+    -> [{ index, role, title, description, value, identifier, bounds, actions }]
+    // requires text and/or role; then e.g. cua.click(app, { element_index: r[0].index })
+An index stays tied to its control for this runtime; re-query after the UI \
+changes rather than reusing a stale index.
 
 Example:
   const send = cua.find("Slack", e => e.role === "AXButton" && /send/i.test(e.title || ""));

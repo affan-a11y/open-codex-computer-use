@@ -13,7 +13,8 @@ import Foundation
 ///   {"op":"reply","id":"<id>","result":{...}}   // host-tool reply; unused here, ignored
 /// Frames out (bridge -> pi, one JSON object per line on stdout):
 ///   {"type":"ready","pid":<int>}                                  // once, at start
-///   {"type":"done","cell":"<id>","index":<int>}                   // per completed statement
+///   {"type":"started","cell":"<id>","index":<int>,"text":"...","start":<int>,"end":<int>}
+///   {"type":"done","cell":"<id>","index":<int>,...}               // completed statement
 ///   {"type":"output","cell":"<id>","text":"<str>"}                // text the code wrote
 ///   {"type":"image","cell":"<id>","data":"<b64>","mimeType":"<str>"}
 ///   {"type":"terminal","cell":"<id>","status":"done"|"failed","error":"<str>"?}
@@ -22,13 +23,29 @@ public final class OpenComputerUsePiBridgeServer {
     private var begun: Set<String> = []
     private var reported: [String: Int] = [:]
     private var closed: Set<String> = []
+    private var pendingFrames: [String] = []
+    private var outputFrame: ((String) -> Void)?
 
     public init(service: ComputerUseService = ComputerUseService()) {
         self.dispatcher = ComputerUseToolDispatcher(service: service)
+        installObserver()
     }
 
     public init(dispatcher: ComputerUseToolDispatcher) {
         self.dispatcher = dispatcher
+        installObserver()
+    }
+
+    private func installObserver() {
+        dispatcher.streamObserver = { [weak self] event in
+            guard let self else { return }
+            let line = Self.encode(event)
+            if let outputFrame = self.outputFrame { outputFrame(line) }
+            else { self.pendingFrames.append(line) }
+            if event["type"] as? String == "done", let cell = event["cell"] as? String {
+                self.reported[cell, default: 0] += 1
+            }
+        }
     }
 
     /// Handle one request line; return zero or more response lines (no trailing newline).
@@ -50,10 +67,10 @@ public final class OpenComputerUsePiBridgeServer {
             return handleSource(cell: cell, source: source, final: final)
         case "abandon":
             guard let cell = object["cell"] as? String, !closed.contains(cell) else { return [] }
-            _ = dispatcher.streamAbandon(id: cell)
+            let result = dispatcher.streamAbandon(id: cell)
             let ran = reported[cell] ?? 0
             close(cell)
-            return [Self.encode(["type": "terminal", "cell": cell, "status": "failed",
+            return drainResult(cell: cell, result: result) + [Self.encode(["type": "terminal", "cell": cell, "status": "failed",
                                  "error": "abandoned after \(ran) statements"])]
         case "reply":
             return []
@@ -69,26 +86,23 @@ public final class OpenComputerUsePiBridgeServer {
             reported[cell] = 0
         }
 
+        pendingFrames = []
         if final {
             let result = dispatcher.streamFinish(id: cell, source: source)
-            var lines = drainResult(cell: cell, result: result)
-            let isError = (result.asDictionary["isError"] as? Bool) ?? false
-            lines.append(Self.encode(["type": "terminal", "cell": cell,
-                                      "status": isError ? "failed" : "done"]))
+            var lines = pendingFrames + drainResult(cell: cell, result: result)
+            let progress = dispatcher.streamProgress(id: cell)
+            var terminal: [String: Any] = ["type": "terminal", "cell": cell,
+                "status": progress.failed ? "failed" : "done"]
+            if let error = progress.error { terminal["error"] = error }
+            lines.append(Self.encode(terminal))
             close(cell)
             return lines
         }
 
         let progress = dispatcher.streamFeed(id: cell, source: source)
-        var lines: [String] = []
-        let already = reported[cell] ?? 0
-        if progress.completed > already {
-            for index in already..<progress.completed {
-                lines.append(Self.encode(["type": "done", "cell": cell, "index": index]))
-            }
-            reported[cell] = progress.completed
-        }
+        var lines = pendingFrames
         if progress.failed {
+            lines += drainResult(cell: cell, result: dispatcher.streamFinish(id: cell, source: nil))
             lines.append(Self.encode(["type": "terminal", "cell": cell, "status": "failed",
                                       "error": progress.error ?? "statement failed"]))
             close(cell)
@@ -127,6 +141,7 @@ public final class OpenComputerUsePiBridgeServer {
     public func run() {
         setvbuf(stdout, nil, _IONBF, 0)
         print(Self.encode(["type": "ready", "pid": Int(ProcessInfo.processInfo.processIdentifier)]))
+        outputFrame = { print($0) }
         while let line = readLine(strippingNewline: true) {
             for response in handle(line: line) {
                 print(response)

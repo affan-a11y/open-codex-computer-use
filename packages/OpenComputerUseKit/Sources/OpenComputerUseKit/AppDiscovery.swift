@@ -141,7 +141,7 @@ enum AppDiscovery {
             }
     }
 
-    static func resolve(_ query: String) throws -> RunningAppDescriptor {
+    static func resolve(_ query: String, activate: Bool = true) throws -> RunningAppDescriptor {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let running = runningApps()
 
@@ -153,7 +153,7 @@ enum AppDiscovery {
             return match
         }
 
-        try launchIfPossible(normalizedQuery)
+        try launchIfPossible(normalizedQuery, activate: activate)
 
         for _ in 0..<20 {
             if let launched = resolvedRunningApp(in: runningApps(), matching: normalizedQuery) {
@@ -298,14 +298,14 @@ enum AppDiscovery {
         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 
-    private static func launchIfPossible(_ query: String) throws {
+    static func launchIfPossible(_ query: String, activate: Bool = true) throws {
         if isBundleIdentifierQuery(query) {
             guard !AppSafetyPolicy.isBlocked(bundleIdentifier: query) else {
                 return
             }
 
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
-                try openApplication(at: appURL)
+                try openApplication(at: appURL, activate: activate)
             }
             return
         }
@@ -318,7 +318,7 @@ enum AppDiscovery {
             return
         }
 
-        try openApplication(at: appURL)
+        try openApplication(at: appURL, activate: activate)
     }
 
     private static func applicationURL(named query: String) -> URL? {
@@ -360,8 +360,9 @@ enum AppDiscovery {
         return nil
     }
 
-    private static func openApplication(at appURL: URL) throws {
+    private static func openApplication(at appURL: URL, activate: Bool) throws {
         let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = activate
         let semaphore = DispatchSemaphore(value: 0)
         let errorBox = LaunchErrorBox()
 

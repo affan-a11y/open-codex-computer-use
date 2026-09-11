@@ -22,6 +22,7 @@ final class JavaScriptToolRuntime {
     private var context: JSContext
     private var output = ""
     private var images: [Data] = []
+    var streamObserver: (([String: Any]) -> Void)?
     private var streamCells: [String: StreamCell] = [:]
 
     /// One streamed call's record. `source` grows by prefix as the model's tool
@@ -32,6 +33,7 @@ final class JavaScriptToolRuntime {
     /// or abandoned stream can leave real effects already applied — the divergence
     /// guard and `abandon` surface that, they cannot undo it.
     private final class StreamCell {
+        var id = ""
         var source = ""
         var executed = 0
         var completed = 0
@@ -102,6 +104,7 @@ final class JavaScriptToolRuntime {
         output = ""
         images = []
         streamCells[id] = StreamCell()
+        streamCells[id]?.id = id
     }
 
     struct StreamProgress {
@@ -110,14 +113,19 @@ final class JavaScriptToolRuntime {
         let error: String?
     }
 
+    func streamProgress(id: String) -> StreamProgress {
+        let cell = streamCells[id]
+        return StreamProgress(completed: cell?.completed ?? 0,
+            failed: cell?.failed ?? true, error: cell?.error)
+    }
+
     /// Feed the growing `code` prefix; executes every statement that has newly
     /// completed since the last feed. The prefix must only grow. Returns how many
     /// statements have run and whether the cell has failed.
     @discardableResult
     func feedStream(id: String, source: String) -> StreamProgress {
         guard let cell = streamCells[id], !cell.finished, !cell.failed else {
-            let cell = streamCells[id]
-            return StreamProgress(completed: cell?.completed ?? 0, failed: cell?.failed ?? true, error: cell?.error)
+            return streamProgress(id: id)
         }
         guard source.hasPrefix(cell.source) else {
             cell.failed = true
@@ -165,35 +173,105 @@ final class JavaScriptToolRuntime {
 
     private func executeNewlyComplete(_ cell: StreamCell, isFinal: Bool) {
         let chars = Array(cell.source)
-        while !cell.failed {
-            if let end = Self.nextStatementEnd(chars, from: cell.executed) {
-                let statement = String(chars[cell.executed..<end])
-                cell.executed = end
-                runStatement(statement, cell: cell)
-            } else if isFinal, cell.executed < chars.count {
-                let statement = String(chars[cell.executed..<chars.count])
-                cell.executed = chars.count
-                runStatement(statement, cell: cell)
-            } else {
-                break
-            }
+        while !cell.failed, cell.executed < chars.count {
+            guard let end = nextRunnableUnitEnd(chars, from: cell.executed, isFinal: isFinal) else { break }
+            let start = cell.executed
+            cell.executed = end
+            guard !String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            evaluateStreamStatement(chars, start: start, end: end, cell: cell)
         }
     }
 
-    private func runStatement(_ statement: String, cell: StreamCell) {
-        let trimmed = statement.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    /// End index (exclusive) of the next complete top-level unit at `start` that is
+    /// ready to run, or nil to wait for more input. An `if`/`try`/`do` block is held
+    /// until its `else`/`catch`/`finally`/`while` continuation — or unrelated code,
+    /// or the end of the stream — shows the unit is closed, so a half-streamed
+    /// branch never runs on its own.
+    private func nextRunnableUnitEnd(_ chars: [Character], from start: Int, isFinal: Bool) -> Int? {
+        var candidate = start
+        while let end = Self.nextStatementEnd(chars, from: candidate) {
+            let unit = String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if unit.isEmpty { return end }                            // blank line: skip past it
+            if !syntaxIsComplete(unit) { candidate = end; continue }   // statement spans more lines
+            guard Self.blockAcceptsContinuation(unit) else {
+                return end                                             // ordinary complete statement
+            }
+            let rest = Self.followingCode(String(chars[end...]))
+            if rest.isEmpty { return isFinal ? end : nil }             // a continuation may still arrive
+            if Self.startsWithContinuation(rest) { candidate = end; continue }  // fold it into this unit
+            if !isFinal, Self.isPartialContinuation(rest) { return nil }        // keyword still streaming
+            return end                                                 // unrelated code follows: block closed
+        }
+        return isFinal ? chars.count : nil
+    }
+
+    private func evaluateStreamStatement(_ chars: [Character], start: Int, end: Int, cell: StreamCell) {
+        let statement = String(chars[start..<end])
+        let event: [String: Any] = [
+            "cell": cell.id, "index": cell.completed, "text": statement,
+            "start": String(chars[..<start]).utf8.count, "end": String(chars[..<end]).utf8.count,
+        ]
+        streamObserver?(event.merging(["type": "started"]) { _, new in new })
         let contextRef = UnsafeMutableRawPointer(context.jsGlobalContextRef)
         ocu_js_set_time_limit(contextRef, 30.0)
-        defer { ocu_js_clear_time_limit(contextRef) }
         context.exception = nil
-        context.evaluateScript(trimmed)
+        context.evaluateScript(statement)
+        ocu_js_clear_time_limit(contextRef)
         if let exception = context.exception {
             cell.failed = true
             cell.error = exception.toString() ?? "JavaScript error"
             return
         }
         cell.completed += 1
+        streamObserver?(event.merging(["type": "done"]) { _, new in new })
+    }
+
+    private static let blockContinuationKeywords = ["else", "catch", "finally", "while"]
+
+    /// True when a unit opens with `if`/`try`/`do` — the only forms JS may continue
+    /// with a trailing else/catch/finally/while, so the only ones worth holding.
+    private static func blockAcceptsContinuation(_ unit: String) -> Bool {
+        switch String(unit.prefix { $0.isLetter }) {
+        case "if", "try", "do": return true
+        default: return false
+        }
+    }
+
+    private static func startsWithContinuation(_ code: String) -> Bool {
+        blockContinuationKeywords.contains { keyword in
+            code.hasPrefix(keyword) && !isIdentifierCharacter(code.dropFirst(keyword.count).first)
+        }
+    }
+
+    /// `code` is a nonempty strict prefix of a continuation keyword still streaming in.
+    private static func isPartialContinuation(_ code: String) -> Bool {
+        blockContinuationKeywords.contains { $0.count > code.count && $0.hasPrefix(code) }
+    }
+
+    private static func isIdentifierCharacter(_ character: Character?) -> Bool {
+        guard let character else { return false }
+        return character.isLetter || character.isNumber || character == "_" || character == "$"
+    }
+
+    private static func followingCode(_ source: String) -> String {
+        var rest = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        while rest.hasPrefix("//") || rest.hasPrefix("/*") {
+            if rest.hasPrefix("//") {
+                guard let newline = rest.firstIndex(of: "\n") else { return "" }
+                rest = String(rest[rest.index(after: newline)...])
+            } else {
+                guard let end = rest.range(of: "*/") else { return "" }
+                rest = String(rest[end.upperBound...])
+            }
+            rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return rest
+    }
+
+    private func syntaxIsComplete(_ source: String) -> Bool {
+        let script = JSStringCreateWithUTF8CString(source)!
+        defer { JSStringRelease(script) }
+        return JSCheckScriptSyntax(context.jsGlobalContextRef, script, nil, 1, nil)
     }
 
     private func cellResult(_ cell: StreamCell) -> ToolCallResult {
@@ -417,7 +495,14 @@ final class JavaScriptToolRuntime {
         for (var i = 0; i < els.length; i++) { if (predicate(els[i])) { return els[i]; } }
         return null;
       },
-      findAll: function (app, predicate, opts) { return this.elements(app, opts).filter(predicate); }
+      findAll: function (app, predicate, opts) { return this.elements(app, opts).filter(predicate); },
+      // Targeted native AX lookup: no snapshot, no screenshot. Returns matching
+      // controls, each with an `index` usable by the actions above (click,
+      // setValue, scroll, secondaryAction). Requires text and/or role.
+      // criteria: { text?, role?, exact?, limit?, max_nodes?, window_id? }
+      query: function (app, criteria) {
+        return JSON.parse(this.call('query', Object.assign({ app: app }, criteria || {})).text);
+      }
     };
     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };
     globalThis.emitImage = function (base64) { return __ocuEmitImage(String(base64)); };

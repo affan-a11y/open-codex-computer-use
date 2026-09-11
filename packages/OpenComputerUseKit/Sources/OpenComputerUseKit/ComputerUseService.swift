@@ -437,9 +437,40 @@ func shouldPreferContainingWebRowAXClickCandidate(
 }
 
 public final class ComputerUseService {
+    private var preparedWindows: [String: CGWindowID] = [:]
     private var snapshotsByApp: [String: AppSnapshot] = [:]
 
+    // Targeted-lookup registry (see targeted-ax-speculative-execution.md). `query`
+    // stores each match here keyed by a high, monotonic element index; the
+    // existing element actions resolve that index to the queried control and act
+    // without any snapshot. Indexes sit above the snapshot tree range and are
+    // never reissued, so a background snapshot cannot reassign one to a different
+    // control.
+    private struct TargetedElement {
+        let record: ElementRecord
+        let context: TargetedAX.WindowContext
+    }
+    private var targetedElements: [Int: TargetedElement] = [:]
+    private var targetedElementOrder: [Int] = []
+    private var targetedIndexCounter = ComputerUseService.targetedIndexBase
+    static let targetedIndexBase = 1_000_000
+    private static let maxTargetedElements = 5000
+
+    // True while a JavaScript program (js runtime, stream, or pi-bridge) is
+    // driving actions: the action path then performs no automatic before/after
+    // snapshot. Direct CLI/MCP action calls leave this false and keep snapshots.
+    private var javaScriptExecutionActive = false
+
     public init() {}
+
+    /// Run `body` as JavaScript-driven execution: actions skip the automatic
+    /// before/after snapshot. Nestable.
+    public func withJavaScriptExecution<T>(_ body: () throws -> T) rethrows -> T {
+        let previous = javaScriptExecutionActive
+        javaScriptExecutionActive = true
+        defer { javaScriptExecutionActive = previous }
+        return try body()
+    }
 
     public func listApps() -> ToolCallResult {
         ToolCallResult.text(
@@ -447,6 +478,14 @@ public final class ComputerUseService {
                 .map(\.renderedLine)
                 .joined(separator: "\n")
         )
+    }
+
+    func bindPreparedWindow(query: String, context: TargetedAX.WindowContext) {
+        guard let id = context.windowID else { return }
+        for key in [query, context.app.name, context.app.bundleIdentifier ?? query] {
+            preparedWindows[key.lowercased()] = id
+            snapshotsByApp[key.lowercased()] = liteSnapshot(context: context, elements: [:])
+        }
     }
 
     public func getAppState(
@@ -526,7 +565,7 @@ public final class ComputerUseService {
             clickCount: clickCount
         )
 
-        let snapshot = try currentSnapshot(for: query)
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
         if snapshot.mode == .fixture {
             guard clickMethod == .auto else {
@@ -555,7 +594,7 @@ public final class ComputerUseService {
 
             Thread.sleep(forTimeInterval: 0.15)
             pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         if let elementIndex {
@@ -684,17 +723,11 @@ public final class ComputerUseService {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
 
-        return snapshotResult(
-            for: try refreshSnapshot(
-                for: query,
-                recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod)
-            ),
-            style: .actionResult
-        )
+        return try actionResult(for: query, recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod))
     }
 
     public func performSecondaryAction(app query: String, elementIndex: String, action: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -702,7 +735,7 @@ public final class ComputerUseService {
                 throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
             }
 
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         guard let rawAction = matchingAction(requested: action, record: record) else {
@@ -719,7 +752,7 @@ public final class ComputerUseService {
         }
 
         Thread.sleep(forTimeInterval: 0.15)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
@@ -731,7 +764,7 @@ public final class ComputerUseService {
             throw ComputerUseError.message("pages must be > 0")
         }
 
-        let snapshot = try currentSnapshot(for: query)
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -740,7 +773,7 @@ public final class ComputerUseService {
             }
             try FixtureBridge.post(FixtureCommand(kind: "scroll", identifier: identifier, direction: normalized, pages: pages))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         if let repeatCount = integralScrollPageCount(pages),
@@ -762,7 +795,7 @@ public final class ComputerUseService {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
         }
 
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
@@ -770,7 +803,7 @@ public final class ComputerUseService {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "drag", identifier: "fixture-drag-pad", x: fromX, y: fromY, toX: toX, toY: toY))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
@@ -781,7 +814,7 @@ public final class ComputerUseService {
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     public func typeText(app query: String, text: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {
@@ -790,21 +823,18 @@ public final class ComputerUseService {
             try requireAutoKeyMethodForFixture(keyMethod)
             try FixtureBridge.post(FixtureCommand(kind: "type_text", identifier: "fixture-input", value: text))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         if keyMethod == .skyKey {
             let target = try skyKeyTarget(for: snapshot)
             try InputSimulation.typeTextWithSkyLight(text, windowID: target.windowID, pid: target.pid)
-            return snapshotResult(
-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
-                style: .actionResult
-            )
+            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
             Thread.sleep(forTimeInterval: 0.1)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         guard try canTypeTextUsingKeyboardFallback(in: snapshot) else {
@@ -812,7 +842,7 @@ public final class ComputerUseService {
         }
 
         try InputSimulation.typeText(text, pid: snapshot.app.pid)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     public func pressKey(app query: String, key: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {
@@ -821,20 +851,17 @@ public final class ComputerUseService {
             try requireAutoKeyMethodForFixture(keyMethod)
             try FixtureBridge.post(FixtureCommand(kind: "press_key", identifier: "fixture-key-capture", value: key))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         if keyMethod == .skyKey {
             let target = try skyKeyTarget(for: snapshot)
             try InputSimulation.pressKeyWithSkyLight(key, windowID: target.windowID, pid: target.pid)
-            return snapshotResult(
-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
-                style: .actionResult
-            )
+            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
         }
 
         try InputSimulation.pressKey(key, pid: snapshot.app.pid)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     private func requireAutoKeyMethodForFixture(_ keyMethod: KeyMethod) throws {
@@ -856,7 +883,7 @@ public final class ComputerUseService {
     }
 
     public func setValue(app query: String, elementIndex: String, value: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -869,7 +896,7 @@ public final class ComputerUseService {
             try FixtureBridge.post(FixtureCommand(kind: "set_value", identifier: identifier, value: value))
             Thread.sleep(forTimeInterval: 0.15)
             settleVisualCursor(at: cursorTarget)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionResult(for: query)
         }
 
         guard let element = record.element else {
@@ -896,15 +923,143 @@ public final class ComputerUseService {
         }
 
         settleVisualCursor(at: cursorTarget)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionResult(for: query)
     }
 
     private func currentSnapshot(for query: String) throws -> AppSnapshot {
-        if let snapshot = snapshotsByApp[query.lowercased()] {
+        if let snapshot = snapshotsByApp[query.lowercased()],
+           !javaScriptExecutionActive || preparedWindows[query.lowercased()] == nil ||
+           snapshot.targetWindowID == preparedWindows[query.lowercased()] {
             return snapshot
         }
 
+        // In JavaScript execution, a missing snapshot must not force a full
+        // capture: resolve just the window context (no tree, no screenshot) so
+        // window-level input can dispatch. Element lookups against this lite
+        // snapshot fail clearly, prompting an explicit getState or query.
+        if javaScriptExecutionActive {
+            let context = try SnapshotBuilder.resolveTargetWindow(for: try AppDiscovery.resolve(query), windowID: preparedWindows[query.lowercased()])
+            return liteSnapshot(context: context, elements: [:])
+        }
+
         return try refreshSnapshot(for: query)
+    }
+
+    /// The snapshot an element action runs against. A queried index (from `query`)
+    /// resolves to that control's own window context with no snapshot; any other
+    /// index uses the normal current snapshot.
+    private func snapshotForAction(app query: String, elementIndex: String?) throws -> AppSnapshot {
+        if let elementIndex, let index = Int(elementIndex), let target = targetedElements[index] {
+            return liteSnapshot(context: target.context, elements: [index: target.record])
+        }
+        return try currentSnapshot(for: query)
+    }
+
+    /// The result an action returns. In the normal path this is the after-action
+    /// full snapshot; under JavaScript execution it is a compact status with no
+    /// refresh, so a burst of speculative actions performs zero automatic
+    /// snapshots.
+    private func actionResult(for query: String, recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation) throws -> ToolCallResult {
+        if javaScriptExecutionActive {
+            return .text("ok")
+        }
+        return snapshotResult(for: try refreshSnapshot(for: query, recoveryPolicy: recoveryPolicy), style: .actionResult)
+    }
+
+    // MARK: targeted lookup
+
+    /// Native targeted search for controls in the app's chosen window. No full
+    /// snapshot, no screenshot, no model-facing output. Each result carries an
+    /// `index` usable by the existing element actions (click, set_value, scroll,
+    /// perform_secondary_action).
+    public func query(
+        app query: String,
+        text: String? = nil,
+        role: String? = nil,
+        exact: Bool = false,
+        limit: Int = 20,
+        maxNodes: Int = 500,
+        windowID: CGWindowID? = nil
+    ) throws -> [[String: Any]] {
+        guard (text.map { !$0.isEmpty } ?? false) || (role.map { !$0.isEmpty } ?? false) else {
+            throw ComputerUseError.invalidArguments("query requires at least one of text or role")
+        }
+
+        let app = try AppDiscovery.resolve(query)
+        let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID ?? preparedWindows[query.lowercased()])
+        let criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
+        let result = SnapshotBuilder.targetedSearch(criteria, in: context)
+
+        // Only fail when the cap stopped us with nothing found — that is the case
+        // where an empty result would be misleading. When matches were found,
+        // return them even if the walk was truncated.
+        if result.capped, result.records.isEmpty {
+            throw ComputerUseError.stateUnavailable(
+                "query hit the max_nodes cap (\(maxNodes)) before finding any match. Raise max_nodes or narrow the query (add a role or more specific text)."
+            )
+        }
+
+        return result.records.map { record in
+            registerTargetedElement(record: record, context: context)
+        }
+    }
+
+    /// A snapshot carrying real window context but no rendered tree or screenshot,
+    /// so the existing action internals run unchanged against targeted elements.
+    private func liteSnapshot(context: TargetedAX.WindowContext, elements: [Int: ElementRecord]) -> AppSnapshot {
+        AppSnapshot(
+            app: context.app,
+            windowTitle: nil,
+            windowBounds: context.windowBounds,
+            targetWindowID: context.windowID,
+            targetWindowLayer: context.windowLayer,
+            screenshotPNGData: nil,
+            mode: .accessibility,
+            treeLines: [],
+            focusedSummary: nil,
+            focusedElement: context.focusedElement,
+            selectedText: nil,
+            windowElement: context.windowElement,
+            elements: elements
+        )
+    }
+
+    private func registerTargetedElement(record source: ElementRecord, context: TargetedAX.WindowContext) -> [String: Any] {
+        targetedIndexCounter += 1
+        let index = targetedIndexCounter
+        // Re-key the record to its assigned public index so lookups match.
+        let record = ElementRecord(
+            index: index,
+            identifier: source.identifier,
+            element: source.element,
+            localFrame: source.localFrame,
+            role: source.role,
+            title: source.title,
+            value: source.value,
+            rawActions: source.rawActions,
+            prettyActions: source.prettyActions,
+            isSyntheticText: source.isSyntheticText
+        )
+        targetedElements[index] = TargetedElement(record: record, context: context)
+        targetedElementOrder.append(index)
+        if targetedElementOrder.count > Self.maxTargetedElements {
+            let evicted = targetedElementOrder.removeFirst()
+            targetedElements[evicted] = nil
+        }
+        return compactRecordDictionary(record)
+    }
+
+    private func compactRecordDictionary(_ record: ElementRecord) -> [String: Any] {
+        var dict: [String: Any] = ["index": record.index]
+        if let role = record.role, !role.isEmpty { dict["role"] = role }
+        if let title = record.title, !title.isEmpty { dict["title"] = title }
+        if let value = record.value, !value.isEmpty { dict["value"] = value }
+        if let identifier = record.identifier, !identifier.isEmpty { dict["identifier"] = identifier }
+        if let frame = record.localFrame {
+            dict["bounds"] = ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height]
+        }
+        if !record.prettyActions.isEmpty { dict["actions"] = record.prettyActions }
+        return dict
     }
 
     @discardableResult

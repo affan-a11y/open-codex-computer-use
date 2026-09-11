@@ -345,6 +345,17 @@ enum SoftwareCursorOverlay {
         }
     }
 
+    /// Multiplier on the synchronous cursor-animation durations (move glide and
+    /// click pulse), which run on the calling thread and so add to per-action
+    /// latency. Default 0.15 (~6x faster than the modeled macOS cursor) keeps a
+    /// quick hint of motion; OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE overrides it
+    /// (1.0 = original, lower = faster, 0 = instant).
+    static var motionDurationScale: Double {
+        guard let raw = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE"],
+              let value = Double(raw) else { return 0.15 }
+        return max(0, value)
+    }
+
     private static func animateMove(from start: CGPoint, to end: CGPoint, relativeTo targetWindow: CursorTargetWindow?) {
         let candidate = bestMotionCandidate(from: start, to: end, relativeTo: targetWindow)
         let path = candidate.path
@@ -354,7 +365,7 @@ enum SoftwareCursorOverlay {
         let duration = OfficialCursorMotionModel.calibratedTravelDuration(
             distance: distanceBetween(start, end),
             measurement: candidate.measurement
-        )
+        ) * motionDurationScale
         let springTargetDuration = OfficialCursorMotionModel.closeEnoughTime
         let startTime = CACurrentMediaTime()
         var progress: CGFloat = 0
@@ -548,7 +559,7 @@ enum SoftwareCursorOverlay {
         let pulseBias: CGFloat = mouseButton == .right ? 0.82 : 1
 
         for pulse in 0..<clickCount {
-            let duration = 0.16
+            let duration = 0.16 * motionDurationScale
             let startTime = CACurrentMediaTime()
 
             while true {
@@ -572,7 +583,7 @@ enum SoftwareCursorOverlay {
             }
 
             if pulse < clickCount - 1 {
-                pause(for: 0.05)
+                pause(for: 0.05 * motionDurationScale)
             }
         }
 

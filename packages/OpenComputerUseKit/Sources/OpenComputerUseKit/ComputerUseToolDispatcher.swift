@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 func normalizedElementIndexArgument(_ value: Any?) -> String? {
@@ -44,9 +45,15 @@ public final class ComputerUseToolDispatcher {
     }
 
     #if canImport(JavaScriptCore)
+    // Actions invoked from JavaScript run in JavaScript-execution mode, so the
+    // action path performs no automatic before/after snapshot (Requirement 2 of
+    // targeted-ax-speculative-execution.md). Explicit reads (get_app_state) and
+    // query still capture / search as usual.
     private lazy var jsRuntime = JavaScriptToolRuntime(
         toolCaller: { [unowned self] name, arguments in
-            try self.callTool(name: name, arguments: arguments)
+            try self.service.withJavaScriptExecution {
+                try self.callTool(name: name, arguments: arguments)
+            }
         },
         elementsProvider: { [unowned self] app in
             try self.service.structuredElements(app: app)
@@ -74,6 +81,25 @@ public final class ComputerUseToolDispatcher {
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         Self.logStep(name: name, arguments: arguments)
         switch name {
+        case "prepare_agent_display":
+            return try AgentPreparation.display()
+        case "agent_app_catalog":
+            return try AgentPreparation.catalog()
+        case "prepare_app":
+            return try AgentPreparation.app(service: service, query: requireString("app", in: arguments),
+                newWindow: arguments["new_window"] as? Bool ?? false)
+        case "observe_app":
+            guard let id = arguments["window_id"] as? UInt32 else {
+                throw ComputerUseError.invalidArguments("observe_app requires window_id")
+            }
+            return try AgentPreparation.observe(query: requireString("app", in: arguments), windowID: id)
+        case "run_intent":
+            return try AppIntentExecution.run(
+                bundleID: requireString("bundle_id", in: arguments),
+                actionID: requireString("action_id", in: arguments),
+                parameters: arguments["parameters"] as? [String: Any] ?? [:],
+                input: optionalString("input", in: arguments)
+            )
         case "list_apps":
             return service.listApps()
         case "get_app_state":
@@ -135,6 +161,17 @@ public final class ComputerUseToolDispatcher {
                 elementIndex: requireElementIndex(in: arguments),
                 value: requireString("value", in: arguments)
             )
+        case "query":
+            let records = try service.query(
+                app: requireString("app", in: arguments),
+                text: optionalString("text", in: arguments),
+                role: optionalString("role", in: arguments),
+                exact: (arguments["exact"] as? Bool) ?? false,
+                limit: try optionalPositiveInt("limit", in: arguments) ?? 20,
+                maxNodes: try optionalPositiveInt("max_nodes", in: arguments) ?? 500,
+                windowID: optionalDouble("window_id", in: arguments).map { CGWindowID($0) }
+            )
+            return jsonResult(records)
         case "js":
             #if canImport(JavaScriptCore)
             let code = try requireString("code", in: arguments)
@@ -149,6 +186,14 @@ public final class ComputerUseToolDispatcher {
         default:
             throw ComputerUseError.unsupportedTool(name)
         }
+    }
+
+    private func jsonResult(_ object: Any) -> ToolCallResult {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]),
+            let text = String(data: data, encoding: .utf8) else {
+            return .text("[]")
+        }
+        return .text(text)
     }
 
     // Live agent feedback: append a human-readable line per real action to TIDE_STEPS_FILE
@@ -182,6 +227,7 @@ public final class ComputerUseToolDispatcher {
         case "drag": return "Dragging\(app)"
         case "set_value": return "Setting a field\(app)"
         case "perform_secondary_action": return "\((arguments["action"] as? String) ?? "Action")\(app)"
+        case "query": return "Finding controls\(app)"
         default: return nil
         }
     }
@@ -208,6 +254,21 @@ public final class ComputerUseToolDispatcher {
         public let error: String?
     }
 
+    public var streamObserver: (([String: Any]) -> Void)? {
+        get {
+            #if canImport(JavaScriptCore)
+            return jsRuntime.streamObserver
+            #else
+            return nil
+            #endif
+        }
+        set {
+            #if canImport(JavaScriptCore)
+            jsRuntime.streamObserver = newValue
+            #endif
+        }
+    }
+
     public func streamBegin(id: String) {
         #if canImport(JavaScriptCore)
         jsRuntime.beginStream(id: id)
@@ -218,6 +279,15 @@ public final class ComputerUseToolDispatcher {
     public func streamFeed(id: String, source: String) -> StreamProgress {
         #if canImport(JavaScriptCore)
         let progress = jsRuntime.feedStream(id: id, source: source)
+        return StreamProgress(completed: progress.completed, failed: progress.failed, error: progress.error)
+        #else
+        return StreamProgress(completed: 0, failed: true, error: "js streaming is unavailable on this platform")
+        #endif
+    }
+
+    public func streamProgress(id: String) -> StreamProgress {
+        #if canImport(JavaScriptCore)
+        let progress = jsRuntime.streamProgress(id: id)
         return StreamProgress(completed: progress.completed, failed: progress.failed, error: progress.error)
         #else
         return StreamProgress(completed: 0, failed: true, error: "js streaming is unavailable on this platform")

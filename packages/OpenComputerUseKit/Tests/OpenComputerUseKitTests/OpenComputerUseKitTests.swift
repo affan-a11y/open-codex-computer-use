@@ -258,9 +258,10 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testDiscreteDefinitionsAreKeptButNotAdvertised() {
         let discrete = Set(ToolDefinitions.discrete.map(\.name))
-        XCTAssertEqual(discrete.count, 9)
+        XCTAssertEqual(discrete.count, 10)
         XCTAssertTrue(discrete.contains("get_app_state"))
         XCTAssertTrue(discrete.contains("click"))
+        XCTAssertTrue(discrete.contains("query"))
         XCTAssertFalse(discrete.contains("js"))
         XCTAssertFalse(ToolDefinitions.all.map(\.name).contains("get_app_state"))
     }

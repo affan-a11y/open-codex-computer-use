@@ -53,6 +53,41 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(seen?["element_index"] as? String, "7")
     }
 
+    func testQueryParsesRecordsAndPassesCriteria() {
+        var seen: [String: Any]?
+        let rt = runtime { tool, args in
+            if tool == "query" {
+                seen = args
+                return .text("[{\"index\":1000001,\"role\":\"AXButton\",\"title\":\"New Note\"}]")
+            }
+            return .text("")
+        }
+        let result = rt.run(
+            code: "const r = cua.query(\"Notes\", { text: \"note\", role: \"AXButton\" }); write(r[0].index + \"|\" + r.length);",
+            timeoutMs: 5000
+        )
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.primaryText, "1000001|1")
+        XCTAssertEqual(seen?["app"] as? String, "Notes")
+        XCTAssertEqual(seen?["role"] as? String, "AXButton")
+        XCTAssertEqual(seen?["text"] as? String, "note")
+    }
+
+    func testQueriedIndexFlowsIntoExistingClick() {
+        var clickArgs: [String: Any]?
+        let rt = runtime { tool, args in
+            if tool == "query" { return .text("[{\"index\":1000002,\"role\":\"AXButton\"}]") }
+            if tool == "click" { clickArgs = args }
+            return .text("ok")
+        }
+        _ = rt.run(
+            code: "const r = cua.query(\"Notes\", { role: \"AXButton\" }); cua.click(\"Notes\", { element_index: r[0].index });",
+            timeoutMs: 5000
+        )
+        XCTAssertEqual(clickArgs?["app"] as? String, "Notes")
+        XCTAssertEqual(clickArgs?["element_index"] as? Int, 1000002)
+    }
+
     func testToolErrorBecomesAThrownError() {
         let rt = runtime { _, _ in .text("no such window", isError: true) }
         let result = rt.run(code: "cua.click(\"Ghost\");", timeoutMs: 5000)

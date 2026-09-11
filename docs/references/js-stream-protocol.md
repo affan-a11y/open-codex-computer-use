@@ -111,3 +111,44 @@ This is version 1. Fields may be added; a compliant feeder ignores unknown
 response fields. Multi-cell pipelining (a cell returning before its source is
 complete so the model predicts the next call) is a possible future extension and
 is not part of v1.
+
+
+## Host preparation and observations
+
+These calls are for a host that owns the model loop. They use `cua.call(name,
+args)` in the persistent runtime. `agent_app_catalog` and `observe_app` can also
+be called through the CLI in a separate process.
+
+| Call | Arguments | Result |
+| --- | --- | --- |
+| `prepare_agent_display` | `{}` | JSON text with display ID and dimensions; creates the display before apps are selected |
+| `agent_app_catalog` | `{}` | JSON text with known apps and the default browser's bundle ID |
+| `prepare_app` | `{app, new_window?: boolean}` | JSON text with app, name and window_id; launches in the background if necessary and parks the window |
+| `observe_app` | `{app, window_id}` | The named window's AX tree and image; does not launch, activate, or substitute another window |
+
+Keep the process that prepared the display alive for the run. Closing its
+`pi-bridge` input restores parked windows. `new_window` sends Command-N to the
+prepared app and waits for a different window; use it for a new browser window.
+If no new window appears, it fails without repeating the command.
+
+Prepared windows remain the default target for that runtime's queries and
+input. Observation processes keep separate snapshot indexes; their indexes are
+for reading. Resolve an actionable reference with `cua.query` in the runtime.
+A separate observation never changes what an existing query index addresses.
+
+## Statement records on pi-bridge
+
+`started` is emitted immediately before executing a statement, with its `cell`,
+zero-based `index`, exact `text`, and UTF-8 byte offsets `start` and `end` in the
+cell source. `done` carries the same fields after it returns successfully.
+These events are emitted during feeds and during the final call. A terminal
+failure includes the native error. Prior prints are delivered on failure and
+abandonment as well as success. An attempted statement without `done` may have
+partially acted; do not replay it automatically.
+
+JavaScriptCore checks syntax before execution. An unfinished control structure
+stays buffered. A closing brace waits for possible `else`, `catch`, or `finally`
+continuations, including intervening comments. Use a semicolon after a complete
+compound statement to finish it promptly, or finish the cell. Semicolons are
+also recommended for ordinary statements. The boundary scanner is still the
+existing conservative scanner; source it cannot separate is checked at finish.

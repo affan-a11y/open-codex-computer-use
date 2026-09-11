@@ -52,6 +52,30 @@ cua.listApps()
 cua.call(tool, args)        // low-level escape hatch: { text, images }
 ```
 
+Targeted lookup (no snapshot or screenshot):
+
+```
+cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
+  -> [{ index, role, title, description, value, identifier, bounds, actions }]
+```
+
+`query` finds controls in the app's chosen window with the app's native AX search
+(`AXUIElementsForSearchPredicate`), falling back to a bounded child traversal
+(`max_nodes`, default 500) when the app has no native search. It requires `text`
+and/or `role`; `text` matches title/description/value (case-insensitive substring,
+or a full match with `exact: true`). Each result's `index` is passed straight to
+the element actions (`cua.click(app, { element_index: r[0].index })`, `setValue`,
+`scroll`, `secondaryAction`). An index stays tied to its control for the runtime;
+re-query after the UI changes rather than reusing a stale one. If the traversal
+cap stops the search early, `query` throws instead of reporting no matches.
+
+Under `js` (and the `stream`/`pi-bridge` feeders), the actions above do **not**
+automatically capture the AX tree or a screenshot before or after acting — a
+burst of predicted steps runs with no snapshot in between. Read back explicitly
+with `getState`/`getAppState`/`screenshot` when your logic needs the result. The
+directly called CLI/MCP action responses are unchanged and still return the
+after-action snapshot.
+
 ## Example
 
 ```

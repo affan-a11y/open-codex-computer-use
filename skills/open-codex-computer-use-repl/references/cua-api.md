@@ -7,7 +7,8 @@ throw an `Error` on a tool failure; catch it where failure is expected.
 
 ### `cua.getState(app, opts?) -> { text, elements }`
 Reads the app's key window once and returns both the accessibility tree text and
-the structured `elements`. Call this before acting. `opts` accepts the same
+the structured `elements`. Request this full observation when needed; targeted
+queries and JavaScript actions do not require it. `opts` accepts the same
 fields as the underlying state read (`text_limit`, `max_tree_nodes`,
 `max_tree_depth`).
 
@@ -25,6 +26,16 @@ Just the structured elements. Each element:
   actions?: string[]    // secondary action names
 }
 ```
+
+### `cua.query(app, criteria) -> Element[]`
+Find controls directly through AX, without a full snapshot or image.
+`criteria` accepts `text`, `role`, `exact`, `limit` (default 20), `max_nodes`
+(default 500), and `window_id`. Supply text or role. Matches stay in JavaScript;
+pass a match's index to an action. Query indexes stay attached to the same
+control across later snapshots. Re-query when that control no longer exists.
+
+JavaScript actions return a short status or throw. They do not automatically
+capture the tree or image. Several predicted actions can run in one program.
 
 ### `cua.find(app, predicate, opts?) -> Element | null`
 First element for which `predicate(element)` is true.
@@ -68,6 +79,16 @@ Running and recently used apps.
 ### `cua.call(tool, args) -> { text, images }`
 Low-level escape hatch that calls any underlying action by name. Returns text and
 any base64 images. Refuses `js` (no re-entry).
+
+### `cua.call("run_intent", { bundle_id, action_id, parameters?, input? }) -> string`
+Runs an App Intent by identity and returns its result to the next statement.
+`bundle_id` and `action_id` are the inventory's fields; `parameters` are the
+intent's own parameter keys; `input` is the Shortcut Input text.
+
+The reply is JSON. `{"installed": true, "output": ...}` is the intent's result.
+`{"installed": false, ...}` means macOS needs the generated shortcut added once:
+prepare Shortcuts, click Add Shortcut, then call `run_intent` again. Adding is
+per action and permanent — later runs go straight through.
 
 ## Output helpers
 

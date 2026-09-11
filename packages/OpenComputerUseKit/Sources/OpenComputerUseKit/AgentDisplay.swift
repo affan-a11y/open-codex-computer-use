@@ -89,6 +89,14 @@ final class AgentDisplay: @unchecked Sendable {
         return parked.filter { $0.value.pid == pid }.map(\.key)
     }
 
+    func prepare() throws -> CGRect {
+        lock.lock()
+        defer { lock.unlock() }
+        let bounds = try ensureDisplay()
+        installExitHookIfNeeded()
+        return bounds
+    }
+
     /// Move `window` onto the agent display. Returns the display bounds.
     @discardableResult
     func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement) throws -> CGRect {
