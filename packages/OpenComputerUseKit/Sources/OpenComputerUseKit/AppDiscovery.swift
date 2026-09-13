@@ -172,7 +172,7 @@ enum AppDiscovery {
         let isRegularApp: Bool
     }
 
-    private static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
+    static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
         if isBundleIdentifierQuery(query) {
             return descriptors.first(where: { descriptor in
                 descriptor.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
@@ -358,6 +358,13 @@ enum AppDiscovery {
         }
 
         return nil
+    }
+
+    /// Open a running app the way a Dock-icon click does, which sends it a reopen event. An app whose
+    /// window is closed but kept (Electron apps do this) shows it again; a background open does not.
+    static func reopen(_ app: RunningAppDescriptor) throws {
+        guard let url = app.runningApplication.bundleURL else { return }
+        try openApplication(at: url, activate: true)
     }
 
     private static func openApplication(at appURL: URL, activate: Bool) throws {

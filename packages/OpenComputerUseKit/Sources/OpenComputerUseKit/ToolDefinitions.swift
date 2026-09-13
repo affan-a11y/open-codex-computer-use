@@ -245,8 +245,10 @@ the ordinary actions. Under js, actions do not auto-capture state, so a burst \
 runs without a snapshot between steps; call getState/getAppState only when you \
 must read a result back.
   cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
-    -> [{ index, role, title, description, value, identifier, bounds, actions }]
+    -> [{ index, role, title, value, identifier, bounds, actions }]  // title falls back to the AX description
     // requires text and/or role; then e.g. cua.click(app, { element_index: r[0].index })
+  cua.waitFor(app, criteria, { timeout_ms?, interval_ms? })
+    -> the same matches, polled until found or timeout (default 5000 ms); [] on timeout
 An index stays tied to its control for this runtime; re-query after the UI \
 changes rather than reusing a stale index.
 

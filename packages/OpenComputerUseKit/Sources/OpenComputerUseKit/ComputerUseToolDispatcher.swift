@@ -89,10 +89,16 @@ public final class ComputerUseToolDispatcher {
             return try AgentPreparation.app(service: service, query: requireString("app", in: arguments),
                 newWindow: arguments["new_window"] as? Bool ?? false)
         case "observe_app":
-            guard let id = arguments["window_id"] as? UInt32 else {
+            guard let id = optionalDouble("window_id", in: arguments), id > 0 else {
                 throw ComputerUseError.invalidArguments("observe_app requires window_id")
             }
-            return try AgentPreparation.observe(query: requireString("app", in: arguments), windowID: id)
+            return try AgentPreparation.observe(query: requireString("app", in: arguments), windowID: CGWindowID(id))
+        case "close_prepared_window":
+            guard let id = optionalDouble("window_id", in: arguments), id > 0 else {
+                throw ComputerUseError.invalidArguments("close_prepared_window requires window_id")
+            }
+            try AgentDisplay.shared.close(windowID: CGWindowID(id))
+            return ToolCallResult(content: [.text("closed \(Int(id))")])
         case "run_intent":
             return try AppIntentExecution.run(
                 bundleID: requireString("bundle_id", in: arguments),
@@ -159,7 +165,7 @@ public final class ComputerUseToolDispatcher {
             return try service.setValue(
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
-                value: requireString("value", in: arguments)
+                value: requireText("value", in: arguments)
             )
         case "query":
             let records = try service.query(
@@ -321,6 +327,14 @@ public final class ComputerUseToolDispatcher {
             throw ComputerUseError.missingArgument(key)
         }
 
+        return value
+    }
+
+    /// A string that may be empty: setting a field to "" is how it is cleared.
+    private func requireText(_ key: String, in arguments: [String: Any]) throws -> String {
+        guard let value = arguments[key] as? String else {
+            throw ComputerUseError.missingArgument(key)
+        }
         return value
     }
 

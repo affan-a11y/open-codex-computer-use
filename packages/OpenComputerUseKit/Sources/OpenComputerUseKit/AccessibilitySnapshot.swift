@@ -514,8 +514,8 @@ private struct WindowCapture {
     let bounds: CGRect
     let image: CGImage?
 
-    /// Exact binding: the window the AX tree was walked from.
-    static func resolve(for pid: pid_t, exactWindowID: CGWindowID?) -> WindowCapture? {
+    /// Exact binding: the window the AX tree was walked from. `capture: false` = geometry only.
+    static func resolve(for pid: pid_t, exactWindowID: CGWindowID?, capture: Bool = true) -> WindowCapture? {
         guard let exactWindowID,
               let infoList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
         else {
@@ -531,20 +531,21 @@ private struct WindowCapture {
             else {
                 continue
             }
-            return WindowCapture(windowID: exactWindowID, layer: layer, bounds: bounds, image: captureImage(windowID: exactWindowID, bounds: bounds))
+            let image = capture ? captureImage(windowID: exactWindowID, bounds: bounds) : nil
+            return WindowCapture(windowID: exactWindowID, layer: layer, bounds: bounds, image: image)
         }
         return nil
     }
 
-    static func resolve(for pid: pid_t, titleHint: String?) -> WindowCapture? {
+    static func resolve(for pid: pid_t, titleHint: String?, capture: Bool = true) -> WindowCapture? {
         // On-screen windows first (front-to-back order is meaningful there);
         // fall back to every window of the pid so a window on another Space
         // still resolves instead of triggering the activate-and-raise recovery.
-        resolve(for: pid, titleHint: titleHint, options: [.optionOnScreenOnly])
-            ?? resolve(for: pid, titleHint: titleHint, options: [.optionAll])
+        resolve(for: pid, titleHint: titleHint, options: [.optionOnScreenOnly], capture: capture)
+            ?? resolve(for: pid, titleHint: titleHint, options: [.optionAll], capture: capture)
     }
 
-    private static func resolve(for pid: pid_t, titleHint: String?, options: CGWindowListOption) -> WindowCapture? {
+    private static func resolve(for pid: pid_t, titleHint: String?, options: CGWindowListOption, capture: Bool) -> WindowCapture? {
         guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
@@ -577,7 +578,7 @@ private struct WindowCapture {
             return nil
         }
 
-        let image = captureImage(windowID: best.windowID, bounds: best.bounds)
+        let image = capture ? captureImage(windowID: best.windowID, bounds: best.bounds) : nil
 
         return WindowCapture(windowID: best.windowID, layer: best.layer, bounds: best.bounds, image: image)
     }
@@ -2296,8 +2297,8 @@ enum TargetedAX {
         let appElement: AXUIElement
         let windowElement: AXUIElement
         let windowID: CGWindowID?
-        let windowLayer: Int?
-        let windowBounds: CGRect?
+        var windowLayer: Int?
+        var windowBounds: CGRect?
         let focusedElement: AXUIElement?
     }
 
@@ -2306,68 +2307,6 @@ enum TargetedAX {
         /// True when the bounded traversal hit its node cap before exhausting the
         /// window subtree, so absence of a match is not conclusive.
         let capped: Bool
-    }
-}
-
-extension WindowCapture {
-    struct Metadata {
-        let windowID: CGWindowID
-        let layer: Int
-        let bounds: CGRect
-    }
-
-    /// Window geometry only — no pixel capture — so the targeted path never
-    /// triggers a screenshot.
-    static func resolveMetadata(for pid: pid_t, exactWindowID: CGWindowID?) -> Metadata? {
-        guard let exactWindowID,
-              let infoList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
-        else {
-            return nil
-        }
-        for info in infoList {
-            guard
-                let number = info[kCGWindowNumber as String] as? NSNumber, number.uint32Value == exactWindowID,
-                let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
-                let layer = info[kCGWindowLayer as String] as? Int,
-                let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDictionary), !bounds.isEmpty
-            else {
-                continue
-            }
-            return Metadata(windowID: exactWindowID, layer: layer, bounds: bounds)
-        }
-        return nil
-    }
-
-    static func resolveMetadata(for pid: pid_t, titleHint: String?) -> Metadata? {
-        for options in [CGWindowListOption.optionOnScreenOnly, CGWindowListOption.optionAll] {
-            guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-                continue
-            }
-            let candidates = infoList.enumerated().compactMap { offset, info -> WindowCaptureCandidate? in
-                guard
-                    let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
-                    let number = info[kCGWindowNumber as String] as? NSNumber,
-                    let layer = info[kCGWindowLayer as String] as? Int,
-                    let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                    let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
-                else {
-                    return nil
-                }
-                return WindowCaptureCandidate(
-                    windowID: CGWindowID(number.uint32Value),
-                    layer: layer,
-                    bounds: bounds,
-                    title: info[kCGWindowName as String] as? String,
-                    area: Int(bounds.width * bounds.height),
-                    frontToBackIndex: offset
-                )
-            }
-            if let best = preferredWindowCaptureCandidate(candidates, titleHint: titleHint) {
-                return Metadata(windowID: best.windowID, layer: best.layer, bounds: best.bounds)
-            }
-        }
-        return nil
     }
 }
 
@@ -2403,8 +2342,8 @@ extension SnapshotBuilder {
 
         let windowTitle = stringValue(of: rootWindow, attribute: kAXTitleAttribute)
         let axWindowID = SkyLightSPI.shared.windowID(for: rootWindow)
-        let meta = WindowCapture.resolveMetadata(for: app.pid, exactWindowID: axWindowID)
-            ?? WindowCapture.resolveMetadata(for: app.pid, titleHint: windowTitle)
+        let meta = WindowCapture.resolve(for: app.pid, exactWindowID: axWindowID, capture: false)
+            ?? WindowCapture.resolve(for: app.pid, titleHint: windowTitle, capture: false)
         let focusedElement = preferredFocusedElement(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
 
         return TargetedAX.WindowContext(
@@ -2416,6 +2355,25 @@ extension SnapshotBuilder {
             windowBounds: meta?.bounds,
             focusedElement: focusedElement
         )
+    }
+
+    /// Current window bounds and element frame for a queried control, so an action
+    /// lands correctly even if the window moved after the query.
+    static func currentGeometry(of record: ElementRecord, in context: TargetedAX.WindowContext) -> (TargetedAX.WindowContext, ElementRecord) {
+        var context = context
+        if let meta = WindowCapture.resolve(for: context.app.pid, exactWindowID: context.windowID, capture: false) {
+            context.windowBounds = meta.bounds
+            context.windowLayer = meta.layer
+        }
+        guard let element = record.element, let frame = resolveLocalFrame(of: element, windowBounds: context.windowBounds) else {
+            return (context, record)
+        }
+        let fresh = ElementRecord(
+            index: record.index, identifier: record.identifier, element: element, localFrame: frame,
+            role: record.role, title: record.title, value: record.value,
+            rawActions: record.rawActions, prettyActions: record.prettyActions, isSyntheticText: record.isSyntheticText
+        )
+        return (context, fresh)
     }
 
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
@@ -2486,9 +2444,8 @@ extension SnapshotBuilder {
             if visited == 1 {
                 // The window itself is the clip; never prune it.
                 clip = scan.globalFrame
-            } else if let clip, let frame = scan.globalFrame, !frame.intersects(clip) {
-                // Scrolled or clipped away: not actionable, and neither are its
-                // descendants — skip the whole branch. Unknown frame → keep.
+            } else if let clip, let frame = scan.globalFrame, !frame.isEmpty, !frame.intersects(clip) {
+                // Off-window subtree. Unknown or 0×0 frame (web wrapper groups) → keep.
                 continue
             }
 

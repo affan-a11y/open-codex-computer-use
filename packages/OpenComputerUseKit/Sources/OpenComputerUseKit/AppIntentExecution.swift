@@ -13,15 +13,31 @@ enum AppIntentExecution {
     /// Deadline for a single `shortcuts` invocation. An intent that prompts will hit it.
     private static let deadline: TimeInterval = 120
 
-    /// An App Intent's action is `<bundle id>.<intent name>`. The inventory also holds
-    /// built-in Shortcuts actions, whose `action_id` is already the whole identifier.
+    /// An App Intent's action is `<bundle id>.<intent name>`, so the model can only
+    /// run the named app's intents, never a built-in Shortcuts action.
     static func identifier(bundleID: String, actionID: String) -> String {
-        actionID.contains(".") ? actionID : "\(bundleID).\(actionID)"
+        actionID.hasPrefix(bundleID + ".") ? actionID : "\(bundleID).\(actionID)"
+    }
+
+    private static let segmentCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+
+    /// The action becomes a shortcut name and a temp file name: require a dotted
+    /// identifier with non-empty segments so `/`, `..`, spaces and newlines never reach the disk.
+    static func isValidIdentifier(_ action: String) -> Bool {
+        action.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { segment in
+            !segment.isEmpty && segment.unicodeScalars.allSatisfy(segmentCharacters.contains)
+        }
     }
 
     static func run(bundleID: String, actionID: String,
                     parameters: [String: Any], input: String?) throws -> ToolCallResult {
         let action = identifier(bundleID: bundleID, actionID: actionID)
+        guard isValidIdentifier(action) else {
+            throw ComputerUseError.invalidArguments("bundle_id/action_id must be a dotted identifier (letters, digits, _ -)")
+        }
+        guard !action.hasPrefix("is.workflow.") else {
+            throw ComputerUseError.permissionDenied("run_intent runs App Intents only; built-in Shortcuts actions are not allowed")
+        }
         let name = "cua.\(action)"
         let installed = try shortcuts(["list"]).split(separator: "\n").contains { $0 == name }
         guard installed else {
@@ -33,15 +49,18 @@ enum AppIntentExecution {
         var arguments = ["run", name]
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("cua-intent-\(UUID().uuidString)")
+        let inputFile = output.appendingPathExtension("in")
+        defer {
+            try? FileManager.default.removeItem(at: output)
+            try? FileManager.default.removeItem(at: inputFile)
+        }
         if let input {
-            let path = output.appendingPathExtension("in")
-            try input.write(to: path, atomically: true, encoding: .utf8)
-            arguments += ["--input-path", path.path]
+            try input.write(to: inputFile, atomically: true, encoding: .utf8)
+            arguments += ["--input-path", inputFile.path]
         }
         arguments += ["--output-path", output.path]
         let log = try shortcuts(arguments)
         let text = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
-        try? FileManager.default.removeItem(at: output)
         return try json(["installed": true, "shortcut": name, "output": text, "log": log])
     }
 
@@ -68,6 +87,7 @@ enum AppIntentExecution {
         try PropertyListSerialization
             .data(fromPropertyList: workflow, format: .binary, options: 0)
             .write(to: unsigned)
+        defer { try? FileManager.default.removeItem(at: unsigned) }
         _ = try shortcuts(["sign", "--mode", "anyone", "--input", unsigned.path, "--output", signed.path])
         _ = try execute("/usr/bin/open", ["-a", "Shortcuts", signed.path])
         return signed
@@ -91,7 +111,7 @@ enum AppIntentExecution {
         // Reading to end of file returns only when the child exits, so the deadline has to
         // end the child. An intent that sits waiting for something would otherwise hold
         // this thread for the rest of the run.
-        let timeout = DispatchWorkItem { process.terminate() }
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: timeout)
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

@@ -1,0 +1,2288 @@
+diff --git a/docs/exec-plans/completed/20260912-agent-loop-integration.md b/docs/exec-plans/completed/20260912-agent-loop-integration.md
+new file mode 100644
+index 0000000..2034b51
+--- /dev/null
++++ b/docs/exec-plans/completed/20260912-agent-loop-integration.md
+@@ -0,0 +1,30 @@
++# Agent loop integration
++
++Implement the missing harness support for creator-agent's approved design.
++Keep the existing targeted-query and snapshot-free action changes.
++
++- [x] Create the agent display before app discovery finishes; prepare windows
++  without taking an extra full snapshot first.
++- [x] Observe an explicitly selected window without activation or recovery.
++- [x] Report attempted and completed statements, including failures and statements
++  executed by the final feed. Deliver progress while the statement runs.
++- [x] Do not execute incomplete if/else or try/catch blocks.
++- [x] Test the wire, parser and read paths; update references and history.
++
++The caller owns program files, observation scheduling and Hyperopia. These do
++not belong in the desktop service. Verify with unit tests and designated local
++apps; do not run the example email flow.
++
++
++Validation: the 39 focused JavaScript/bridge/stream tests passed. The final
++OpenComputerUse debug product built. A live Finder check prepared the display
++and window, read its AX tree and image from a separate process, and queried two
++controls in the persistent runtime. The runtime then closed normally.
++
++App preparation reuses AppDiscovery with activation disabled. The new-window
++route is implemented but was not exercised in this live check. Claude's active
++query/action changes were preserved; they are separate from this integration.
++
++Apple App Intent execution inside the JS program remains unimplemented.
++macOS rejected the tested LinkServices call. The Shortcuts adapter was removed
++because it did not implement execution by app/action identity and parameters.
+diff --git a/docs/histories/2026-09/20260912-0150-targeted-ax-speculative-execution.md b/docs/histories/2026-09/20260912-0150-targeted-ax-speculative-execution.md
+new file mode 100644
+index 0000000..ea35911
+--- /dev/null
++++ b/docs/histories/2026-09/20260912-0150-targeted-ax-speculative-execution.md
+@@ -0,0 +1,64 @@
++## [2026-09-12 01:50] | Task: 实现 targeted AX lookup 与 no-snapshot 动作
++
++### 🤖 Execution Context
++* **Agent ID**: `claude-code`
++* **Base Model**: `claude-opus-4-8`
++* **Runtime**: `Claude Code CLI`
++
++### 📥 User Query
++> 按 `docs/product-specs/targeted-ax-speculative-execution.md` 实现两项能力：
++> (1) 定向 AX 查找，直接把匹配控件返回给 JavaScript；(2) 动作执行不再在每步前后
++> 自动抓全量快照/截图。目标是让流式 JS 程序在首个动作后连续执行多步预测，而不必
++> 每步都回模型或抓全树。
++
++### 🛠 Changes Overview
++**Scope:** `packages/OpenComputerUseKit`
++
++**Key Actions:**
++- **Targeted lookup**: 新增 `TargetedAX` + `SnapshotBuilder` 扩展。`resolveTargetWindow`
++  只读解析当前目标窗口（不激活、不抬升、不截图）；`targetedSearch` 先用应用原生
++  `AXUIElementsForSearchPredicate`，不支持时退回**有界**子树遍历（上限 5000 节点，
++  非全量快照），返回带实时 `AXUIElement` 引用与窗口内相对 frame 的紧凑记录。
++- **No-snapshot actions**: `ComputerUseService` 增加 ref 表与 `activeTargetedSnapshot`
++  模式。动作方法结尾统一走新的 `actionResult(...)`——targeted 模式下直接返回 `ok`，
++  完全跳过 `refreshSnapshot`；`currentSnapshot` 在该模式下返回不含树/截图的 lite
++  snapshot，从而**复用**既有 click/type/scroll/setValue/secondary 内部逻辑与后台
++  输入（sky_click/sky_key）、虚拟显示定向，无需重写。
++- **API 暴露**: 新增调度工具 `query` 与统一的 `act`（op=click/set_value/scroll/
++  secondary/type/press_key）；JS `cua` 增加 `cua.query(app, criteria)` 与 `cua.fast.*`。
++  refs 稳定、与快照数字索引解耦，跨调用有效直到再次 query。
++- **Docs/Tests**: 更新 spec 状态、`js-code-tool.md`、`js` 工具说明与 discrete 定义；
++  新增 `TargetedAXTests`（纯匹配逻辑）与 JS 接线测试（query/fast.click/fast.type）。
++
++### 🧠 Design Intent (Why)
++规范要求“查找不等于每步验证”“动作派发不得因快照缓存为空而隐式抓全树/截图”。
++选择新增独立路径而非改默认路径：既满足既有调用者兼容，又能在 JS 层下方直接验证
++“零自动快照/截图”。lite snapshot 让新路径复用全部经过调优的动作内部实现，是最小且
++低风险的接缝；有界遍历作为原生搜索不支持时的显式退路，绝不退化为隐藏的全量快照。
++
++### 🚀 Follow-up (perf + integration, same session)
++- **Native search unsupported on this macOS**: `AXUIElementsForSearchPredicate` returns
++  `parameterizedAttributeUnsupported` on every app tried, so the bounded traversal is
++  the real path. Made it fast: interleave matching with the walk and stop at `limit`;
++  read role/title/description/value/identifier/position/size in one
++  `AXUIElementCopyMultipleAttributeValues` call per node; prune off-screen subtrees by
++  geometry against the root window's own AX frame (this macOS leaves AXVisibleChildren
++  empty). Result: query dropped from 100–966ms to 15–56ms across Calculator/Finder/
++  Safari/System Settings/Notes/TextEdit, verified live; `9×8=72` driven end-to-end.
++- **Cursor latency**: the software-cursor overlay animates synchronously on the calling
++  thread. Added `SoftwareCursorOverlay.motionDurationScale` (default 0.3 ≈ 3x faster,
++  `OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE`) applied to the move glide and click pulse;
++  click latency ~320ms → ~210ms, still synchronous and visible.
++- **Integration**: reconciled `TargetedAX.WindowContext.windowElement` to optional for a
++  concurrent agent's window-preparation work; `targetedSearch` guards it.
++
++### 📁 Files Modified
++- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AccessibilitySnapshot.swift`
++- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift`
++- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift`
++- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift`
++- `packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ToolDefinitions.swift`
++- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/TargetedAXTests.swift`
++- `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/JavaScriptToolRuntimeTests.swift`
++- `docs/product-specs/targeted-ax-speculative-execution.md`
++- `docs/references/js-code-tool.md`
+diff --git a/docs/histories/2026-09/20260912-0310-agent-loop-integration.md b/docs/histories/2026-09/20260912-0310-agent-loop-integration.md
+new file mode 100644
+index 0000000..2064678
+--- /dev/null
++++ b/docs/histories/2026-09/20260912-0310-agent-loop-integration.md
+@@ -0,0 +1,32 @@
++# Agent loop integration
++
++The user asked for the speculative agent design to be implemented and for the
++harness work to remain focused while another contributor worked on queries.
++
++Added explicit display/window preparation and a read of a named window for an
++independent observer. Preparation reuses app discovery with activation disabled;
++prepared windows remain the runtime's default action/query target.
++
++The pi bridge now reports each attempted and completed statement, including
++statements run by the final feed. Failures and abandoned calls retain prior
++prints. The stream waits for complete control structures, including continuations
++separated by comments. JavaScriptCore checks syntax before execution.
++
++The host still owns program files, background observation scheduling and
++Hyperopia. No model or context management was added to the desktop service.
++
++Validation: 39 focused JavaScript/bridge/stream tests passed. The final debug
++product built. A live Finder check created the agent display, prepared its
++window, captured that window's tree and image independently, and performed a
++query in the persistent runtime. The new-browser-window route remains untested
++live. Existing query/action work was retained.
++
++Files: AgentPreparation.swift, AgentDisplay.swift, AppDiscovery.swift,
++AccessibilitySnapshot.swift, ComputerUseService.swift, ComputerUseToolDispatcher.swift,
++JavaScriptToolRuntime.swift, PiBridgeServer.swift, and their protocol/API docs.
++
++The user subsequently requested Apple-intent execution inside the JS program.
++macOS rejected the tested LinkServices call, including from a locally signed
++app bundle. A Shortcuts adapter was tried and removed because it did not
++implement the requested app/action invocation. Apple-intent execution remains
++unimplemented.
+diff --git a/docs/product-specs/index.md b/docs/product-specs/index.md
+index 0f76aa1..35f03f6 100644
+--- a/docs/product-specs/index.md
++++ b/docs/product-specs/index.md
+@@ -8,3 +8,9 @@
+ - 从用户问题和可见结果写起，不要一上来就写实现。
+ - 写清验收标准和外部可观察到的变化。
+ - 关联对应的 execution plan、release note 和架构调整。
++
++## Specs
++
++- [Targeted AX lookup and actions without automatic snapshots](targeted-ax-speculative-execution.md)
++  — speculative JavaScript execution on macOS: `cua.query` targeted lookup and
++  snapshot-free actions. Implemented 2026-09-12.
+diff --git a/docs/product-specs/targeted-ax-speculative-execution.md b/docs/product-specs/targeted-ax-speculative-execution.md
+new file mode 100644
+index 0000000..a64fd65
+--- /dev/null
++++ b/docs/product-specs/targeted-ax-speculative-execution.md
+@@ -0,0 +1,207 @@
++# What we need from open-codex-computer-use
++
++These are the requirements for the agent's JavaScript programs. They describe
++what we want implemented.
++
++Status: Implemented 2026-09-12 in `packages/OpenComputerUseKit`
++(see "Implemented" at the end).
++
++Date: 2026-09-12.
++
++The idea:
++
++The model writes a program that predicts several actions ahead. The program
++should be able to find a control and use it without taking a full AX tree or
++screenshot after every action.
++
++For example, after opening Gmail, it should find Compose, press it and fill the
++composer in the same execution. The model does not need to see each of those
++intermediate screens.
++
++1. Find controls directly through AX.
++
++Add this JavaScript call:
++
++```js
++var matches = cua.query("Safari", {
++    text: "Compose",
++    role: "AXButton",
++    limit: 2
++});
++```
++
++How it should work:
++
++i. `app` names the app or its bundle ID. Search the app window prepared for this
++run. The query can also take `window_id` to name a particular window.
++
++ii. `text` matches text in the control's title, description or value. Match
++case-insensitive substrings. An optional `exact: true` asks for a complete text
++match instead. `role` is optional and matches an exact AX role. Require at least
++one of `text` or `role`.
++
++iii. Return an array of matching controls. `limit` is the maximum number of
++matches after applying the filters; default to 20. No match returns an empty
++array. Multiple matches remain multiple matches for the program to choose from.
++
++iv. Each match has an `index` usable by the existing element actions. Include
++the role and available title, description, value, identifier, bounds and actions.
++Do not return a full tree or screenshot.
++
++v. Use native AX search when the app supports it. If it does not, search the
++chosen window's AX nodes with a cap of 500 nodes by default, configurable as
++`max_nodes`. Stop when enough matches are found. If the cap prevents finishing
++the query, report that clearly instead of claiming there are no matches.
++Do not build and render a full snapshot first.
++
++vi. A query can find a control that appeared after an earlier action, even if
++that control was not in the last full snapshot. It must not require
++`getState()` first.
++
++vii. Keep returned indexes tied to the same controls for this runtime. A
++background snapshot must not reassign a saved index to a different control.
++References are only for this run, not values to save in reusable programs.
++
++viii. The results stay inside JavaScript. They reach the model only if the
++program deliberately prints them. Native errors throw a short error.
++
++For example:
++
++```js
++var matches = cua.query("Safari", {
++    text: "Compose",
++    role: "AXButton",
++    limit: 2
++});
++
++if (matches.length !== 1) {
++    throw new Error("Expected one Compose button; found " + matches.length);
++}
++
++cua.click("Safari", { element_index: matches[0].index });
++```
++
++This is an example of the API, not a tested Gmail selector.
++
++2. Actions should not automatically take another observation.
++
++This applies to actions called from JavaScript, including through `stream`
++and `pi-bridge`:
++
++- `cua.click`
++- `cua.type`
++- `cua.pressKey`
++- `cua.setValue`
++- `cua.scroll`
++- `cua.drag`
++- `cua.secondaryAction`
++
++How they should work:
++
++i. Run the action and return normally, or throw the native error.
++
++ii. Do not refresh the full AX tree or capture a screenshot before or after
++each action. Taking a snapshot and then discarding its output still costs time.
++
++iii. Keep the app/window information needed to direct input separately from the
++full snapshot. A missing full snapshot must not force a capture when the target
++has already been prepared.
++
++iv. Keep background input and the agent display working. Use the intended app
++window without bringing it to the foreground.
++
++v. Do not add an automatic check or wait after every action. The program can
++write its own targeted query, wait or failure handling when needed.
++
++vi. Run statements in order. If an error is not caught, stop the later
++statements. Keep track of what already ran. Do not replay it automatically.
++
++vii. Return only short status or error information. A successful action call
++means the action was performed or input was sent; it does not by itself prove
++that the user's whole task is complete.
++
++These rules apply to JavaScript execution. The existing full observation APIs
++remain available when explicitly called. Changing the separate, directly called
++CLI/MCP action responses is outside this requirement.
++
++3. Let the calling agent harness decide when to observe.
++
++The agent harness prepares the AX tree and app shot for the model's turns.
++It can also read them in the background and reuse a capture for several filters.
++
++The running program does not wait for a full observation between speculative
++actions. A targeted query for a control is separate from preparing a full
++observation for the model.
++
++Hyperopia belongs to the calling agent harness. It runs in the background and
++mutates stored history whenever a compaction result is ready. Execution and the
++next model request never wait for it. An in-flight request keeps the context
++already sent to the provider.
++
++What needs changing in the current code:
++
++At revision `257d869b79920c17e8541b4a06fdbae093c99b9a`:
++
++i. [`cua.find()`](../../packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift)
++calls `elements()`, which calls `getState()`, so it takes a new snapshot before
++filtering. The new `query()` must avoid that path.
++
++ii. [The action methods](../../packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift)
++call `refreshSnapshot()` after acting. Some also capture when no cached
++snapshot exists. The JavaScript action path must stop requiring those captures.
++
++iii. The service has coordinate AX hit testing, but not the targeted native
++search described above.
++[macos-harness's query](https://github.com/browser-use/macos-harness/blob/main/src/macos_harness/controls.py)
++is a reference for the required behavior.
++
++How to check it when implemented:
++
++1. Find a control that appeared after an action, then use it without taking a
++full snapshot or screenshot in between.
++2. After preparing a window, run several JavaScript actions and confirm that
++they cause zero automatic full snapshots or screenshots.
++3. Check the native calls, not only the output. Empty output does not prove
++that a snapshot was skipped.
++4. Check no matches, multiple matches, a search cap, an unsupported native
++search and a native action error.
++5. Confirm a background capture does not change what a saved control index
++means.
++6. Explicitly request a full observation and confirm it shows the current app.
++7. Compare execution time and capture counts with the old path using designated
++test targets. Do not assume a speedup before measuring it.
++
++The existing JavaScript and streaming behavior is described in
++[the JavaScript tool](../references/js-code-tool.md) and
++[the streaming protocol](../references/js-stream-protocol.md).
++
++## Implemented
++
++Shipped 2026-09-12.
++
++1. Lookup — `cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })`
++   returns matching controls, each with an `index` the existing element actions
++   accept: `cua.click(app, { element_index: r[0].index })`, `setValue`, `scroll`,
++   `secondaryAction`. It requires `text` and/or `role`, uses the app's native
++   `AXUIElementsForSearchPredicate`, and falls back to a bounded child traversal
++   (`max_nodes`, default 500). No full snapshot or screenshot. When the traversal
++   cap stops the search before it finishes, `query` reports that instead of
++   returning an empty list. Indexes are assigned above the snapshot range and are
++   never reissued, so a background snapshot never repoints a saved index.
++   Backed by `SnapshotBuilder.resolveTargetWindow` (read-only window resolution,
++   no activation/raise/capture) and `SnapshotBuilder.targetedSearch`.
++
++2. Snapshot-free actions — under JavaScript execution (js runtime, `stream`,
++   `pi-bridge`), the action path performs no automatic before/after snapshot:
++   `ComputerUseService.withJavaScriptExecution` sets the mode, `actionResult`
++   returns a compact status instead of an after-action capture, and
++   `currentSnapshot` resolves only the window context (no tree/screenshot) when no
++   snapshot is cached. Background input and virtual-display targeting are
++   unchanged. Direct CLI/MCP action calls are outside JavaScript execution and
++   keep their snapshot responses.
++
++Key files: `AccessibilitySnapshot.swift` (`TargetedAX`, `SnapshotBuilder`
++targeted extension, `WindowCapture.resolveMetadata`), `ComputerUseService.swift`
++(registry, `query`, `snapshotForAction`, `actionResult`), `ComputerUseToolDispatcher.swift`
++(`query` tool, JavaScript-execution wrapper), `JavaScriptToolRuntime.swift`
++(`cua.query`), `ToolDefinitions.swift`.
+diff --git a/docs/references/js-code-tool.md b/docs/references/js-code-tool.md
+index 5c40051..9ca31a6 100644
+--- a/docs/references/js-code-tool.md
++++ b/docs/references/js-code-tool.md
+@@ -52,6 +52,30 @@ cua.listApps()
+ cua.call(tool, args)        // low-level escape hatch: { text, images }
+ ```
+ 
++Targeted lookup (no snapshot or screenshot):
++
++```
++cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
++  -> [{ index, role, title, description, value, identifier, bounds, actions }]
++```
++
++`query` finds controls in the app's chosen window with the app's native AX search
++(`AXUIElementsForSearchPredicate`), falling back to a bounded child traversal
++(`max_nodes`, default 500) when the app has no native search. It requires `text`
++and/or `role`; `text` matches title/description/value (case-insensitive substring,
++or a full match with `exact: true`). Each result's `index` is passed straight to
++the element actions (`cua.click(app, { element_index: r[0].index })`, `setValue`,
++`scroll`, `secondaryAction`). An index stays tied to its control for the runtime;
++re-query after the UI changes rather than reusing a stale one. If the traversal
++cap stops the search early, `query` throws instead of reporting no matches.
++
++Under `js` (and the `stream`/`pi-bridge` feeders), the actions above do **not**
++automatically capture the AX tree or a screenshot before or after acting — a
++burst of predicted steps runs with no snapshot in between. Read back explicitly
++with `getState`/`getAppState`/`screenshot` when your logic needs the result. The
++directly called CLI/MCP action responses are unchanged and still return the
++after-action snapshot.
++
+ ## Example
+ 
+ ```
+diff --git a/docs/references/js-stream-protocol.md b/docs/references/js-stream-protocol.md
+index 33e5277..7c3fceb 100644
+--- a/docs/references/js-stream-protocol.md
++++ b/docs/references/js-stream-protocol.md
+@@ -111,3 +111,44 @@ This is version 1. Fields may be added; a compliant feeder ignores unknown
+ response fields. Multi-cell pipelining (a cell returning before its source is
+ complete so the model predicts the next call) is a possible future extension and
+ is not part of v1.
++
++
++## Host preparation and observations
++
++These calls are for a host that owns the model loop. They use `cua.call(name,
++args)` in the persistent runtime. `agent_app_catalog` and `observe_app` can also
++be called through the CLI in a separate process.
++
++| Call | Arguments | Result |
++| --- | --- | --- |
++| `prepare_agent_display` | `{}` | JSON text with display ID and dimensions; creates the display before apps are selected |
++| `agent_app_catalog` | `{}` | JSON text with known apps and the default browser's bundle ID |
++| `prepare_app` | `{app, new_window?: boolean}` | JSON text with app, name and window_id; launches in the background if necessary and parks the window |
++| `observe_app` | `{app, window_id}` | The named window's AX tree and image; does not launch, activate, or substitute another window |
++
++Keep the process that prepared the display alive for the run. Closing its
++`pi-bridge` input restores parked windows. `new_window` sends Command-N to the
++prepared app and waits for a different window; use it for a new browser window.
++If no new window appears, it fails without repeating the command.
++
++Prepared windows remain the default target for that runtime's queries and
++input. Observation processes keep separate snapshot indexes; their indexes are
++for reading. Resolve an actionable reference with `cua.query` in the runtime.
++A separate observation never changes what an existing query index addresses.
++
++## Statement records on pi-bridge
++
++`started` is emitted immediately before executing a statement, with its `cell`,
++zero-based `index`, exact `text`, and UTF-8 byte offsets `start` and `end` in the
++cell source. `done` carries the same fields after it returns successfully.
++These events are emitted during feeds and during the final call. A terminal
++failure includes the native error. Prior prints are delivered on failure and
++abandonment as well as success. An attempted statement without `done` may have
++partially acted; do not replay it automatically.
++
++JavaScriptCore checks syntax before execution. An unfinished control structure
++stays buffered. A closing brace waits for possible `else`, `catch`, or `finally`
++continuations, including intervening comments. Use a semicolon after a complete
++compound statement to finish it promptly, or finish the cell. Semicolons are
++also recommended for ordinary statements. The boundary scanner is still the
++existing conservative scanner; source it cannot separate is checked at finish.
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AccessibilitySnapshot.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AccessibilitySnapshot.swift
+index 99482e3..b7c9e10 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AccessibilitySnapshot.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AccessibilitySnapshot.swift
+@@ -181,7 +181,8 @@ enum SnapshotBuilder {
+         for app: RunningAppDescriptor,
+         textLimit: SnapshotTextLimit = .defaults,
+         treeLimits: AccessibilityTreeLimits = .defaults,
+-        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation
++        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
++        windowID: CGWindowID? = nil
+     ) throws -> AppSnapshot {
+         if app.name == FixtureBridge.appName, let fixtureState = try FixtureBridge.readState() {
+             return buildFixtureSnapshot(app: app, state: fixtureState)
+@@ -205,6 +206,12 @@ enum SnapshotBuilder {
+             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
+         }
+ 
++        if let windowID {
++            guard let named = windowElement(for: windowID, appElement: appElement) else {
++                throw ComputerUseError.stateUnavailable("window_id \(windowID) no longer exists")
++            }
++            focusedWindow = named
++        }
+         var rootWindow: AXUIElement
+         guard let resolvedFocusedWindow = focusedWindow else {
+             throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+@@ -217,7 +224,7 @@ enum SnapshotBuilder {
+         // the title/area heuristics remain the fallback.
+         var windowCapture = TimingLog.measure("snapshot.window_capture") {
+             WindowCapture.resolve(for: app.pid, exactWindowID: SkyLightSPI.shared.windowID(for: rootWindow))
+-                ?? WindowCapture.resolve(for: app.pid, titleHint: windowTitle)
++                ?? (windowID == nil ? WindowCapture.resolve(for: app.pid, titleHint: windowTitle) : nil)
+         }
+         if windowCapture == nil,
+            recoveryPolicy == .allowActivation,
+@@ -2264,3 +2271,388 @@ private extension CGRect {
+         "x=\(Int(origin.x)), y=\(Int(origin.y)), w=\(Int(width)), h=\(Int(height))"
+     }
+ }
++
++// MARK: - Targeted AX lookup (no snapshot / screenshot)
++//
++// Backs `cua.query` and the snapshot-free JavaScript action path
++// (docs/product-specs/targeted-ax-speculative-execution.md). Lookup uses the
++// app's native `AXUIElementsForSearchPredicate` where supported, and a bounded
++// child traversal (default 500 nodes, `max_nodes`) otherwise. Neither renders a
++// tree, captures a screenshot, or reads snapshotsByApp, so a control introduced
++// by a previous action is findable even though it was absent from the last full
++// snapshot.
++
++enum TargetedAX {
++    struct Criteria {
++        var text: String?
++        var exact: Bool
++        var role: String?
++        var limit: Int
++        var maxNodes: Int
++    }
++
++    struct WindowContext {
++        let app: RunningAppDescriptor
++        let appElement: AXUIElement
++        let windowElement: AXUIElement
++        let windowID: CGWindowID?
++        let windowLayer: Int?
++        let windowBounds: CGRect?
++        let focusedElement: AXUIElement?
++    }
++
++    struct SearchResult {
++        let records: [ElementRecord]
++        /// True when the bounded traversal hit its node cap before exhausting the
++        /// window subtree, so absence of a match is not conclusive.
++        let capped: Bool
++    }
++}
++
++extension WindowCapture {
++    struct Metadata {
++        let windowID: CGWindowID
++        let layer: Int
++        let bounds: CGRect
++    }
++
++    /// Window geometry only — no pixel capture — so the targeted path never
++    /// triggers a screenshot.
++    static func resolveMetadata(for pid: pid_t, exactWindowID: CGWindowID?) -> Metadata? {
++        guard let exactWindowID,
++              let infoList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
++        else {
++            return nil
++        }
++        for info in infoList {
++            guard
++                let number = info[kCGWindowNumber as String] as? NSNumber, number.uint32Value == exactWindowID,
++                let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
++                let layer = info[kCGWindowLayer as String] as? Int,
++                let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
++                let bounds = CGRect(dictionaryRepresentation: boundsDictionary), !bounds.isEmpty
++            else {
++                continue
++            }
++            return Metadata(windowID: exactWindowID, layer: layer, bounds: bounds)
++        }
++        return nil
++    }
++
++    static func resolveMetadata(for pid: pid_t, titleHint: String?) -> Metadata? {
++        for options in [CGWindowListOption.optionOnScreenOnly, CGWindowListOption.optionAll] {
++            guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
++                continue
++            }
++            let candidates = infoList.enumerated().compactMap { offset, info -> WindowCaptureCandidate? in
++                guard
++                    let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
++                    let number = info[kCGWindowNumber as String] as? NSNumber,
++                    let layer = info[kCGWindowLayer as String] as? Int,
++                    let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
++                    let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
++                else {
++                    return nil
++                }
++                return WindowCaptureCandidate(
++                    windowID: CGWindowID(number.uint32Value),
++                    layer: layer,
++                    bounds: bounds,
++                    title: info[kCGWindowName as String] as? String,
++                    area: Int(bounds.width * bounds.height),
++                    frontToBackIndex: offset
++                )
++            }
++            if let best = preferredWindowCaptureCandidate(candidates, titleHint: titleHint) {
++                return Metadata(windowID: best.windowID, layer: best.layer, bounds: best.bounds)
++            }
++        }
++        return nil
++    }
++}
++
++extension SnapshotBuilder {
++    /// Resolve a target window read-only: no activation, no raise, no screenshot.
++    /// Mirrors the window-finding prologue of `build` without the tree walk or
++    /// capture, so it never redirects input or steals focus. `windowID` selects a
++    /// specific window; otherwise the app's current focused window is used.
++    static func resolveTargetWindow(for app: RunningAppDescriptor, windowID: CGWindowID? = nil) throws -> TargetedAX.WindowContext {
++        if app.name == FixtureBridge.appName {
++            throw ComputerUseError.message("targeted lookup is not supported for fixture apps")
++        }
++
++        guard PermissionDiagnostics.current().accessibilityTrusted else {
++            throw ComputerUseError.permissionDenied("Accessibility permission is required. Run `open-computer-use doctor` and grant access to Open Computer Use.")
++        }
++
++        let appElement = AXUIElementCreateApplication(app.pid)
++        _ = enableBestEffortAccessibilityModes(appElement)
++        let systemWide = AXUIElementCreateSystemWide()
++        let focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
++
++        let rootWindow: AXUIElement
++        if let windowID, let named = windowElement(for: windowID, appElement: appElement) {
++            rootWindow = named
++        } else if let windowID {
++            throw ComputerUseError.stateUnavailable("window_id \(windowID) is not a current window of \(app.bundleIdentifier ?? app.name).")
++        } else if let focused = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
++            rootWindow = focused
++        } else {
++            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
++        }
++
++        let windowTitle = stringValue(of: rootWindow, attribute: kAXTitleAttribute)
++        let axWindowID = SkyLightSPI.shared.windowID(for: rootWindow)
++        let meta = WindowCapture.resolveMetadata(for: app.pid, exactWindowID: axWindowID)
++            ?? WindowCapture.resolveMetadata(for: app.pid, titleHint: windowTitle)
++        let focusedElement = preferredFocusedElement(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
++
++        return TargetedAX.WindowContext(
++            app: app,
++            appElement: appElement,
++            windowElement: rootWindow,
++            windowID: meta?.windowID ?? axWindowID,
++            windowLayer: meta?.layer,
++            windowBounds: meta?.bounds,
++            focusedElement: focusedElement
++        )
++    }
++
++    private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
++        copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
++            SkyLightSPI.shared.windowID(for: $0) == windowID
++        }
++    }
++
++    // Attributes read for every visited node, in one batched IPC call. Position
++    // and size ride along so we can (a) skip descending into off-screen subtrees
++    // and (b) fill the record's frame without another round trip.
++    private static let searchScanAttributes: [String] = [
++        kAXRoleAttribute as String,
++        kAXTitleAttribute as String,
++        kAXDescriptionAttribute as String,
++        kAXValueAttribute as String,
++        kAXIdentifierAttribute as String,
++        kAXPositionAttribute as String,
++        kAXSizeAttribute as String,
++    ]
++
++    /// Find controls in the target window matching `criteria`. Tries the app's
++    /// native `AXUIElementsForSearchPredicate` first (unsupported on many macOS
++    /// builds); otherwise a bounded breadth-first walk that **interleaves matching
++    /// and stops as soon as `limit` matches are found**, and reads all scan
++    /// attributes for a node in a single batched AX call. Records carry live
++    /// AXUIElement references and window-local frames, so the caller can act on
++    /// them without any snapshot.
++    static func targetedSearch(_ criteria: TargetedAX.Criteria, in context: TargetedAX.WindowContext) -> TargetedAX.SearchResult {
++        let limit = max(1, min(criteria.limit, 100))
++        let windowElement = context.windowElement
++
++        // Native optimized search, when the app offers it: results are already the
++        // matching set, so just build records (still stop at `limit`).
++        if let native = predicateSearch(root: windowElement, searchText: criteria.text, resultsLimit: limit * 4) {
++            var records: [ElementRecord] = []
++            for element in native {
++                let scan = batchScan(element)
++                guard targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) else { continue }
++                records.append(makeRecord(element, scan: scan, windowBounds: context.windowBounds))
++                if records.count >= limit { break }
++            }
++            return TargetedAX.SearchResult(records: records, capped: false)
++        }
++
++        // Bounded BFS with interleaved matching and early stop. Off-screen
++        // subtrees are pruned by geometry, which collapses scrolled-away list and
++        // table content that this macOS does not expose via AXVisibleChildren.
++        // The clip rect is the root window's OWN AX frame, captured in this same
++        // pass — so it can never skew against the node frames the way a separately
++        // read CGWindow bounds can when the window moves.
++        let budget = max(1, criteria.maxNodes)
++        let windowBounds = context.windowBounds
++        var clip: CGRect?
++        var records: [ElementRecord] = []
++        var queue: [AXUIElement] = [windowElement]
++        var head = 0
++        var visited = 0
++        var capped = false
++        while head < queue.count {
++            if visited >= budget { capped = true; break }
++            let element = queue[head]
++            head += 1
++            visited += 1
++
++            let scan = batchScan(element)
++
++            if visited == 1 {
++                // The window itself is the clip; never prune it.
++                clip = scan.globalFrame
++            } else if let clip, let frame = scan.globalFrame, !frame.intersects(clip) {
++                // Scrolled or clipped away: not actionable, and neither are its
++                // descendants — skip the whole branch. Unknown frame → keep.
++                continue
++            }
++
++            if targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) {
++                records.append(makeRecord(element, scan: scan, windowBounds: windowBounds))
++                if records.count >= limit { capped = false; break }
++            }
++
++            queue.append(contentsOf: searchChildren(of: element, role: scan.role))
++        }
++        return TargetedAX.SearchResult(records: records, capped: capped)
++    }
++
++    // Roles whose children are a potentially huge row set (file lists, tables,
++    // message lists). For these, walk only the on-screen subset — that is what a
++    // user can act on now — so the search does not drown in off-screen rows.
++    private static let largeContainerRoles: Set<String> = [
++        kAXTableRole as String, kAXOutlineRole as String, kAXListRole as String,
++        "AXBrowser", "AXCollection", "AXGrid",
++    ]
++
++    private static func searchChildren(of element: AXUIElement, role: String?) -> [AXUIElement] {
++        if let role, largeContainerRoles.contains(role),
++           let visible = copyArray(element, attribute: axVisibleChildrenAttribute), !visible.isEmpty {
++            return visible
++        }
++        return copyArray(element, attribute: kAXChildrenAttribute) ?? []
++    }
++
++    private struct NodeScan {
++        let role: String?
++        let title: String?
++        let description: String?
++        let value: String?
++        let identifier: String?
++        let globalFrame: CGRect?
++    }
++
++    /// Read the scan attributes in a single `AXUIElementCopyMultipleAttributeValues`
++    /// IPC call (falls back to individual reads if the batch call is unsupported).
++    private static func batchScan(_ element: AXUIElement) -> NodeScan {
++        var values: CFArray?
++        let error = AXUIElementCopyMultipleAttributeValues(
++            element,
++            searchScanAttributes as CFArray,
++            AXCopyMultipleAttributeOptions(),
++            &values
++        )
++        let raw: [AnyObject]
++        if error == .success, let array = values as? [AnyObject], array.count == searchScanAttributes.count {
++            raw = array
++        } else {
++            raw = searchScanAttributes.map { attribute -> AnyObject in
++                var v: CFTypeRef?
++                _ = AXUIElementCopyAttributeValue(element, attribute as CFString, &v)
++                return v ?? (NSNull() as AnyObject)
++            }
++        }
++        func str(_ i: Int) -> String? { raw[i] as? String }
++        return NodeScan(
++            role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),
++            globalFrame: axFrame(position: raw[5], size: raw[6])
++        )
++    }
++
++    private static func axFrame(position: AnyObject?, size: AnyObject?) -> CGRect? {
++        guard let position, let size,
++              CFGetTypeID(position as CFTypeRef) == AXValueGetTypeID(),
++              CFGetTypeID(size as CFTypeRef) == AXValueGetTypeID() else {
++            return nil
++        }
++        var point = CGPoint.zero
++        var extent = CGSize.zero
++        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
++              AXValueGetValue(size as! AXValue, .cgSize, &extent) else {
++            return nil
++        }
++        return CGRect(origin: point, size: extent)
++    }
++
++    private static func makeRecord(_ element: AXUIElement, scan: NodeScan, windowBounds: CGRect?) -> ElementRecord {
++        let rawActions = copyActions(element) ?? []
++        // Reuse the frame from the batched scan; window-relative when we have bounds.
++        let localFrame: CGRect?
++        if let frame = scan.globalFrame {
++            localFrame = windowBounds.map { windowRelativeFrame(elementFrame: frame, windowBounds: $0) } ?? frame
++        } else {
++            localFrame = resolveLocalFrame(of: element, windowBounds: windowBounds)
++        }
++        return ElementRecord(
++            index: 0, // reassigned by the caller when registered
++            identifier: displayIdentifier(scan.identifier),
++            element: element,
++            localFrame: localFrame,
++            role: scan.role,
++            title: scan.title ?? scan.description,
++            value: scan.value.map { $0.count > defaultTextLimit ? String($0.prefix(defaultTextLimit)) : $0 },
++            rawActions: rawActions,
++            prettyActions: scan.role.map { meaningfulActions(rawActions, role: $0) } ?? rawActions
++        )
++    }
++
++    /// Native optimized search via the app's `AXUIElementsForSearchPredicate`
++    /// parameterized attribute (as Accessibility Inspector uses). Returns nil when
++    /// the app does not support it, so the caller can fall back to traversal.
++    private static func predicateSearch(root: AXUIElement, searchText: String?, resultsLimit: Int) -> [AXUIElement]? {
++        var parameters: [String: Any] = [
++            "AXSearchKey": "AXAnyTypeSearchKey",
++            "AXResultsLimit": resultsLimit,
++            "AXImmediateDescendantsOnly": false,
++            "AXVisibleOnly": false,
++        ]
++        if let searchText, !searchText.isEmpty {
++            parameters["AXSearchText"] = searchText
++        }
++
++        var result: CFTypeRef?
++        let error = AXUIElementCopyParameterizedAttributeValue(
++            root,
++            "AXUIElementsForSearchPredicate" as CFString,
++            parameters as CFDictionary,
++            &result
++        )
++        guard error == .success, let elements = result as? [AXUIElement] else {
++            return nil
++        }
++        return elements
++    }
++}
++
++/// Pure record filter, factored out so it is unit-testable without a live
++/// accessibility tree. `text` matches title/description/value (substring, or a
++/// full match when `exact`); `role` matches the AX role (the AX prefix optional).
++func targetedRecordMatches(
++    _ criteria: TargetedAX.Criteria,
++    role: String?,
++    title: String?,
++    description: String?,
++    value: String?
++) -> Bool {
++    if let wantedRole = criteria.role, !targetedRoleEquals(role, wantedRole) {
++        return false
++    }
++    if let wantedText = criteria.text, !wantedText.isEmpty {
++        let fields = [title, description, value]
++        let hit = fields.contains { field in
++            guard let field else { return false }
++            if criteria.exact {
++                return field.caseInsensitiveCompare(wantedText) == .orderedSame
++            }
++            return field.range(of: wantedText, options: .caseInsensitive) != nil
++        }
++        if !hit { return false }
++    }
++    return true
++}
++
++/// Role match tolerant of the `AX` prefix ("button" matches "AXButton").
++func targetedRoleEquals(_ actual: String?, _ wanted: String) -> Bool {
++    guard let actual else { return false }
++    func normalize(_ s: String) -> String {
++        var r = s.trimmingCharacters(in: .whitespaces).lowercased()
++        if r.hasPrefix("ax") { r.removeFirst(2) }
++        return r
++    }
++    return normalize(actual) == normalize(wanted)
++}
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentDisplay.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentDisplay.swift
+index 203e84f..2129050 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentDisplay.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentDisplay.swift
+@@ -89,6 +89,14 @@ final class AgentDisplay: @unchecked Sendable {
+         return parked.filter { $0.value.pid == pid }.map(\.key)
+     }
+ 
++    func prepare() throws -> CGRect {
++        lock.lock()
++        defer { lock.unlock() }
++        let bounds = try ensureDisplay()
++        installExitHookIfNeeded()
++        return bounds
++    }
++
+     /// Move `window` onto the agent display. Returns the display bounds.
+     @discardableResult
+     func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement) throws -> CGRect {
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentPreparation.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentPreparation.swift
+new file mode 100644
+index 0000000..ef415d4
+--- /dev/null
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AgentPreparation.swift
+@@ -0,0 +1,87 @@
++import AppKit
++import ApplicationServices
++import Foundation
++
++/// Preparation and independent observations for a host-owned agent loop.
++/// These reads never change a saved query index or recover a different window.
++enum AgentPreparation {
++    static func display() throws -> ToolCallResult {
++        let bounds = try AgentDisplay.shared.prepare()
++        return try json(["version": 1, "display_id": AgentDisplay.shared.displayID,
++                         "width": Int(bounds.width), "height": Int(bounds.height)])
++    }
++
++    static func app(service: ComputerUseService, query: String, newWindow: Bool) throws -> ToolCallResult {
++        let app = try AppDiscovery.resolve(query, activate: false)
++        if (try? SnapshotBuilder.resolveTargetWindow(for: app)) == nil {
++            try AppDiscovery.launchIfPossible(query, activate: false)
++        }
++        var context = try awaitWindow(app: app)
++        let originalID = context.windowID
++        try park(service: service, query: query, context: context)
++        if newWindow {
++            _ = try service.withJavaScriptExecution {
++                try service.pressKey(app: query, key: "super+n", keyMethod: .skyKey)
++            }
++            context = try awaitWindow(app: app, excluding: originalID)
++            try park(service: service, query: query, context: context)
++        }
++        guard let id = context.windowID else {
++            throw ComputerUseError.stateUnavailable("No window ID for \(query)")
++        }
++        return try json(["app": app.bundleIdentifier ?? app.name, "name": app.name, "window_id": id])
++    }
++
++    private static func park(service: ComputerUseService, query: String, context: TargetedAX.WindowContext) throws {
++        let element: AXUIElement? = context.windowElement
++        guard let id = context.windowID, let window = element else {
++            throw ComputerUseError.stateUnavailable("No window ID for \(query)")
++        }
++        try AgentDisplay.shared.park(windowID: id, pid: context.app.pid, window: window)
++        // Bounds changed when parked. Keep the action context in that display.
++        let parked = try SnapshotBuilder.resolveTargetWindow(for: context.app, windowID: id)
++        service.bindPreparedWindow(query: query, context: parked)
++    }
++
++    private static func awaitWindow(app: RunningAppDescriptor, excluding: CGWindowID? = nil) throws -> TargetedAX.WindowContext {
++        let deadline = Date().addingTimeInterval(3)
++        repeat {
++            if let context = try? SnapshotBuilder.resolveTargetWindow(for: app),
++               let id = context.windowID, id != excluding { return context }
++            Thread.sleep(forTimeInterval: 0.05)
++        } while Date() < deadline
++        throw ComputerUseError.stateUnavailable("The requested window did not open in \(app.name)")
++    }
++
++    static func observe(query: String, windowID: CGWindowID) throws -> ToolCallResult {
++        guard let app = running(query) else { throw ComputerUseError.appNotFound(query) }
++        if let bundle = app.bundleIdentifier, AppSafetyPolicy.isBlocked(bundleIdentifier: bundle) {
++            throw AppSafetyPolicy.permissionDenied(bundleIdentifier: bundle)
++        }
++        let snapshot = try SnapshotBuilder.build(for: app, textLimit: .max,
++            recoveryPolicy: .readOnly, windowID: windowID)
++        var content = [ToolResultContentItem.text(snapshot.renderedText(style: .fullState))]
++        if let png = snapshot.screenshotPNGData { content.append(.pngImage(png)) }
++        return ToolCallResult(content: content)
++    }
++
++    static func catalog() throws -> ToolCallResult {
++        let browserURL = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!)
++        let browser = browserURL.flatMap { Bundle(url: $0)?.bundleIdentifier }
++        let apps: [[String: Any]] = AppDiscovery.listCatalog().map {
++            ["name": $0.name, "app": $0.bundleIdentifier, "running": $0.isRunning]
++        }
++        return try json(["agent_loop": 1, "apps": apps, "default_browser": browser as Any? ?? NSNull()])
++    }
++
++    private static func running(_ query: String) -> RunningAppDescriptor? {
++        AppDiscovery.runningApps().first {
++            $0.name.caseInsensitiveCompare(query) == .orderedSame ||
++            $0.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
++        }
++    }
++
++    private static func json(_ value: Any) throws -> ToolCallResult {
++        .text(String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self))
++    }
++}
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppDiscovery.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppDiscovery.swift
+index 88a533a..e5bb632 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppDiscovery.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppDiscovery.swift
+@@ -141,7 +141,7 @@ enum AppDiscovery {
+             }
+     }
+ 
+-    static func resolve(_ query: String) throws -> RunningAppDescriptor {
++    static func resolve(_ query: String, activate: Bool = true) throws -> RunningAppDescriptor {
+         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+         let running = runningApps()
+ 
+@@ -153,7 +153,7 @@ enum AppDiscovery {
+             return match
+         }
+ 
+-        try launchIfPossible(normalizedQuery)
++        try launchIfPossible(normalizedQuery, activate: activate)
+ 
+         for _ in 0..<20 {
+             if let launched = resolvedRunningApp(in: runningApps(), matching: normalizedQuery) {
+@@ -298,14 +298,14 @@ enum AppDiscovery {
+         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+     }
+ 
+-    private static func launchIfPossible(_ query: String) throws {
++    static func launchIfPossible(_ query: String, activate: Bool = true) throws {
+         if isBundleIdentifierQuery(query) {
+             guard !AppSafetyPolicy.isBlocked(bundleIdentifier: query) else {
+                 return
+             }
+ 
+             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
+-                try openApplication(at: appURL)
++                try openApplication(at: appURL, activate: activate)
+             }
+             return
+         }
+@@ -318,7 +318,7 @@ enum AppDiscovery {
+             return
+         }
+ 
+-        try openApplication(at: appURL)
++        try openApplication(at: appURL, activate: activate)
+     }
+ 
+     private static func applicationURL(named query: String) -> URL? {
+@@ -360,8 +360,9 @@ enum AppDiscovery {
+         return nil
+     }
+ 
+-    private static func openApplication(at appURL: URL) throws {
++    private static func openApplication(at appURL: URL, activate: Bool) throws {
+         let configuration = NSWorkspace.OpenConfiguration()
++        configuration.activates = activate
+         let semaphore = DispatchSemaphore(value: 0)
+         let errorBox = LaunchErrorBox()
+ 
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppIntentExecution.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppIntentExecution.swift
+new file mode 100644
+index 0000000..797f94c
+--- /dev/null
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/AppIntentExecution.swift
+@@ -0,0 +1,113 @@
++import Foundation
++
++/// Runs an App Intent by app/action identity from inside the JavaScript program.
++///
++/// macOS has no unentitled API that invokes an App Intent directly: the private
++/// LinkServices executor rejects any client that is not a validated bundle. The one
++/// supported route is Shortcuts, whose workflow action identifier for an App Intent is
++/// `<bundle id>.<intent name>` — the two fields the inventory already stores. So a
++/// workflow holding just that action is generated, signed with `shortcuts sign`, and
++/// opened for the agent to add once. `shortcuts list` is the record of what is added;
++/// there is no separate binding table to drift from it.
++enum AppIntentExecution {
++    /// Deadline for a single `shortcuts` invocation. An intent that prompts will hit it.
++    private static let deadline: TimeInterval = 120
++
++    /// An App Intent's action is `<bundle id>.<intent name>`. The inventory also holds
++    /// built-in Shortcuts actions, whose `action_id` is already the whole identifier.
++    static func identifier(bundleID: String, actionID: String) -> String {
++        actionID.contains(".") ? actionID : "\(bundleID).\(actionID)"
++    }
++
++    static func run(bundleID: String, actionID: String,
++                    parameters: [String: Any], input: String?) throws -> ToolCallResult {
++        let action = identifier(bundleID: bundleID, actionID: actionID)
++        let name = "cua.\(action)"
++        let installed = try shortcuts(["list"]).split(separator: "\n").contains { $0 == name }
++        guard installed else {
++            let file = try install(name: name, action: action, parameters: parameters)
++            return try json(["installed": false, "shortcut": name, "file": file.path,
++                             "next": "Shortcuts is showing an Add Shortcut sheet for \(name). "
++                                   + "Prepare Shortcuts, click Add Shortcut, then call run_intent again."])
++        }
++        var arguments = ["run", name]
++        let output = FileManager.default.temporaryDirectory
++            .appendingPathComponent("cua-intent-\(UUID().uuidString)")
++        if let input {
++            let path = output.appendingPathExtension("in")
++            try input.write(to: path, atomically: true, encoding: .utf8)
++            arguments += ["--input-path", path.path]
++        }
++        arguments += ["--output-path", output.path]
++        let log = try shortcuts(arguments)
++        let text = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
++        try? FileManager.default.removeItem(at: output)
++        return try json(["installed": true, "shortcut": name, "output": text, "log": log])
++    }
++
++    /// Writes the signed workflow and opens it so the agent can add it once.
++    private static func install(name: String, action: String,
++                                parameters: [String: Any]) throws -> URL {
++        let workflow: [String: Any] = [
++            "WFWorkflowClientVersion": "2038.0.6",
++            "WFWorkflowMinimumClientVersion": 900,
++            "WFWorkflowMinimumClientVersionString": "900",
++            "WFWorkflowTypes": ["NCWidget"],
++            "WFWorkflowInputContentItemClasses": ["WFStringContentItem"],
++            "WFWorkflowIcon": ["WFWorkflowIconStartColor": 946986751, "WFWorkflowIconGlyphNumber": 59511],
++            "WFWorkflowImportQuestions": [],
++            "WFQuickActionSurfaces": [],
++            "WFWorkflowActions": [[
++                "WFWorkflowActionIdentifier": action,
++                "WFWorkflowActionParameters": parameters,
++            ]],
++        ]
++        let directory = FileManager.default.temporaryDirectory
++        let unsigned = directory.appendingPathComponent("\(name).unsigned.shortcut")
++        let signed = directory.appendingPathComponent("\(name).shortcut")
++        try PropertyListSerialization
++            .data(fromPropertyList: workflow, format: .binary, options: 0)
++            .write(to: unsigned)
++        _ = try shortcuts(["sign", "--mode", "anyone", "--input", unsigned.path, "--output", signed.path])
++        _ = try execute("/usr/bin/open", ["-a", "Shortcuts", signed.path])
++        return signed
++    }
++
++    private static func shortcuts(_ arguments: [String]) throws -> String {
++        try execute("/usr/bin/shortcuts", arguments)
++    }
++
++    /// Runs a tool to completion with no stdin. `shortcuts` reads stdin when it is left
++    /// attached, which would consume this runtime's own JS protocol pipe.
++    private static func execute(_ path: String, _ arguments: [String]) throws -> String {
++        let process = Process()
++        process.executableURL = URL(fileURLWithPath: path)
++        process.arguments = arguments
++        process.standardInput = FileHandle.nullDevice
++        let pipe = Pipe()
++        process.standardOutput = pipe
++        process.standardError = pipe
++        try process.run()
++        // Reading to end of file returns only when the child exits, so the deadline has to
++        // end the child. An intent that sits waiting for something would otherwise hold
++        // this thread for the rest of the run.
++        let timeout = DispatchWorkItem { process.terminate() }
++        DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: timeout)
++        let data = pipe.fileHandleForReading.readDataToEndOfFile()
++        process.waitUntilExit()
++        timeout.cancel()
++        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
++        guard process.terminationReason == .exit else {
++            throw ComputerUseError.stateUnavailable(
++                "\(path) \(arguments[0]) was killed at the \(Int(deadline))s deadline: \(text)")
++        }
++        guard process.terminationStatus == 0 else {
++            throw ComputerUseError.stateUnavailable("\(path) \(arguments[0]) failed: \(text)")
++        }
++        return text
++    }
++
++    private static func json(_ value: Any) throws -> ToolCallResult {
++        .text(String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self))
++    }
++}
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift
+index 1c194b2..f709609 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseService.swift
+@@ -437,10 +437,41 @@ func shouldPreferContainingWebRowAXClickCandidate(
+ }
+ 
+ public final class ComputerUseService {
++    private var preparedWindows: [String: CGWindowID] = [:]
+     private var snapshotsByApp: [String: AppSnapshot] = [:]
+ 
++    // Targeted-lookup registry (see targeted-ax-speculative-execution.md). `query`
++    // stores each match here keyed by a high, monotonic element index; the
++    // existing element actions resolve that index to the queried control and act
++    // without any snapshot. Indexes sit above the snapshot tree range and are
++    // never reissued, so a background snapshot cannot reassign one to a different
++    // control.
++    private struct TargetedElement {
++        let record: ElementRecord
++        let context: TargetedAX.WindowContext
++    }
++    private var targetedElements: [Int: TargetedElement] = [:]
++    private var targetedElementOrder: [Int] = []
++    private var targetedIndexCounter = ComputerUseService.targetedIndexBase
++    static let targetedIndexBase = 1_000_000
++    private static let maxTargetedElements = 5000
++
++    // True while a JavaScript program (js runtime, stream, or pi-bridge) is
++    // driving actions: the action path then performs no automatic before/after
++    // snapshot. Direct CLI/MCP action calls leave this false and keep snapshots.
++    private var javaScriptExecutionActive = false
++
+     public init() {}
+ 
++    /// Run `body` as JavaScript-driven execution: actions skip the automatic
++    /// before/after snapshot. Nestable.
++    public func withJavaScriptExecution<T>(_ body: () throws -> T) rethrows -> T {
++        let previous = javaScriptExecutionActive
++        javaScriptExecutionActive = true
++        defer { javaScriptExecutionActive = previous }
++        return try body()
++    }
++
+     public func listApps() -> ToolCallResult {
+         ToolCallResult.text(
+             AppDiscovery.listCatalog()
+@@ -449,6 +480,14 @@ public final class ComputerUseService {
+         )
+     }
+ 
++    func bindPreparedWindow(query: String, context: TargetedAX.WindowContext) {
++        guard let id = context.windowID else { return }
++        for key in [query, context.app.name, context.app.bundleIdentifier ?? query] {
++            preparedWindows[key.lowercased()] = id
++            snapshotsByApp[key.lowercased()] = liteSnapshot(context: context, elements: [:])
++        }
++    }
++
+     public func getAppState(
+         app query: String,
+         textLimit: SnapshotTextLimit = .defaults,
+@@ -526,7 +565,7 @@ public final class ComputerUseService {
+             clickCount: clickCount
+         )
+ 
+-        let snapshot = try currentSnapshot(for: query)
++        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
+         if snapshot.mode == .fixture {
+             guard clickMethod == .auto else {
+@@ -555,7 +594,7 @@ public final class ComputerUseService {
+ 
+             Thread.sleep(forTimeInterval: 0.15)
+             pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         if let elementIndex {
+@@ -684,17 +723,11 @@ public final class ComputerUseService {
+             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
+         }
+ 
+-        return snapshotResult(
+-            for: try refreshSnapshot(
+-                for: query,
+-                recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod)
+-            ),
+-            style: .actionResult
+-        )
++        return try actionResult(for: query, recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod))
+     }
+ 
+     public func performSecondaryAction(app query: String, elementIndex: String, action: String) throws -> ToolCallResult {
+-        let snapshot = try currentSnapshot(for: query)
++        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+ 
+         if snapshot.mode == .fixture {
+@@ -702,7 +735,7 @@ public final class ComputerUseService {
+                 throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
+             }
+ 
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         guard let rawAction = matchingAction(requested: action, record: record) else {
+@@ -719,7 +752,7 @@ public final class ComputerUseService {
+         }
+ 
+         Thread.sleep(forTimeInterval: 0.15)
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
+@@ -731,7 +764,7 @@ public final class ComputerUseService {
+             throw ComputerUseError.message("pages must be > 0")
+         }
+ 
+-        let snapshot = try currentSnapshot(for: query)
++        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+ 
+         if snapshot.mode == .fixture {
+@@ -740,7 +773,7 @@ public final class ComputerUseService {
+             }
+             try FixtureBridge.post(FixtureCommand(kind: "scroll", identifier: identifier, direction: normalized, pages: pages))
+             Thread.sleep(forTimeInterval: 0.15)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         if let repeatCount = integralScrollPageCount(pages),
+@@ -762,7 +795,7 @@ public final class ComputerUseService {
+             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
+         }
+ 
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
+@@ -770,7 +803,7 @@ public final class ComputerUseService {
+         if snapshot.mode == .fixture {
+             try FixtureBridge.post(FixtureCommand(kind: "drag", identifier: "fixture-drag-pad", x: fromX, y: fromY, toX: toX, toY: toY))
+             Thread.sleep(forTimeInterval: 0.15)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
+@@ -781,7 +814,7 @@ public final class ComputerUseService {
+             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
+             snapshot: snapshot
+         )
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     public func typeText(app query: String, text: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {
+@@ -790,21 +823,18 @@ public final class ComputerUseService {
+             try requireAutoKeyMethodForFixture(keyMethod)
+             try FixtureBridge.post(FixtureCommand(kind: "type_text", identifier: "fixture-input", value: text))
+             Thread.sleep(forTimeInterval: 0.15)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         if keyMethod == .skyKey {
+             let target = try skyKeyTarget(for: snapshot)
+             try InputSimulation.typeTextWithSkyLight(text, windowID: target.windowID, pid: target.pid)
+-            return snapshotResult(
+-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
+-                style: .actionResult
+-            )
++            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
+         }
+ 
+         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
+             Thread.sleep(forTimeInterval: 0.1)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         guard try canTypeTextUsingKeyboardFallback(in: snapshot) else {
+@@ -812,7 +842,7 @@ public final class ComputerUseService {
+         }
+ 
+         try InputSimulation.typeText(text, pid: snapshot.app.pid)
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     public func pressKey(app query: String, key: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {
+@@ -821,20 +851,17 @@ public final class ComputerUseService {
+             try requireAutoKeyMethodForFixture(keyMethod)
+             try FixtureBridge.post(FixtureCommand(kind: "press_key", identifier: "fixture-key-capture", value: key))
+             Thread.sleep(forTimeInterval: 0.15)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         if keyMethod == .skyKey {
+             let target = try skyKeyTarget(for: snapshot)
+             try InputSimulation.pressKeyWithSkyLight(key, windowID: target.windowID, pid: target.pid)
+-            return snapshotResult(
+-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
+-                style: .actionResult
+-            )
++            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
+         }
+ 
+         try InputSimulation.pressKey(key, pid: snapshot.app.pid)
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     private func requireAutoKeyMethodForFixture(_ keyMethod: KeyMethod) throws {
+@@ -856,7 +883,7 @@ public final class ComputerUseService {
+     }
+ 
+     public func setValue(app query: String, elementIndex: String, value: String) throws -> ToolCallResult {
+-        let snapshot = try currentSnapshot(for: query)
++        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+ 
+         if snapshot.mode == .fixture {
+@@ -869,7 +896,7 @@ public final class ComputerUseService {
+             try FixtureBridge.post(FixtureCommand(kind: "set_value", identifier: identifier, value: value))
+             Thread.sleep(forTimeInterval: 0.15)
+             settleVisualCursor(at: cursorTarget)
+-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++            return try actionResult(for: query)
+         }
+ 
+         guard let element = record.element else {
+@@ -896,17 +923,145 @@ public final class ComputerUseService {
+         }
+ 
+         settleVisualCursor(at: cursorTarget)
+-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
++        return try actionResult(for: query)
+     }
+ 
+     private func currentSnapshot(for query: String) throws -> AppSnapshot {
+-        if let snapshot = snapshotsByApp[query.lowercased()] {
++        if let snapshot = snapshotsByApp[query.lowercased()],
++           !javaScriptExecutionActive || preparedWindows[query.lowercased()] == nil ||
++           snapshot.targetWindowID == preparedWindows[query.lowercased()] {
+             return snapshot
+         }
+ 
++        // In JavaScript execution, a missing snapshot must not force a full
++        // capture: resolve just the window context (no tree, no screenshot) so
++        // window-level input can dispatch. Element lookups against this lite
++        // snapshot fail clearly, prompting an explicit getState or query.
++        if javaScriptExecutionActive {
++            let context = try SnapshotBuilder.resolveTargetWindow(for: try AppDiscovery.resolve(query), windowID: preparedWindows[query.lowercased()])
++            return liteSnapshot(context: context, elements: [:])
++        }
++
+         return try refreshSnapshot(for: query)
+     }
+ 
++    /// The snapshot an element action runs against. A queried index (from `query`)
++    /// resolves to that control's own window context with no snapshot; any other
++    /// index uses the normal current snapshot.
++    private func snapshotForAction(app query: String, elementIndex: String?) throws -> AppSnapshot {
++        if let elementIndex, let index = Int(elementIndex), let target = targetedElements[index] {
++            return liteSnapshot(context: target.context, elements: [index: target.record])
++        }
++        return try currentSnapshot(for: query)
++    }
++
++    /// The result an action returns. In the normal path this is the after-action
++    /// full snapshot; under JavaScript execution it is a compact status with no
++    /// refresh, so a burst of speculative actions performs zero automatic
++    /// snapshots.
++    private func actionResult(for query: String, recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation) throws -> ToolCallResult {
++        if javaScriptExecutionActive {
++            return .text("ok")
++        }
++        return snapshotResult(for: try refreshSnapshot(for: query, recoveryPolicy: recoveryPolicy), style: .actionResult)
++    }
++
++    // MARK: targeted lookup
++
++    /// Native targeted search for controls in the app's chosen window. No full
++    /// snapshot, no screenshot, no model-facing output. Each result carries an
++    /// `index` usable by the existing element actions (click, set_value, scroll,
++    /// perform_secondary_action).
++    public func query(
++        app query: String,
++        text: String? = nil,
++        role: String? = nil,
++        exact: Bool = false,
++        limit: Int = 20,
++        maxNodes: Int = 500,
++        windowID: CGWindowID? = nil
++    ) throws -> [[String: Any]] {
++        guard (text.map { !$0.isEmpty } ?? false) || (role.map { !$0.isEmpty } ?? false) else {
++            throw ComputerUseError.invalidArguments("query requires at least one of text or role")
++        }
++
++        let app = try AppDiscovery.resolve(query)
++        let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID ?? preparedWindows[query.lowercased()])
++        let criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
++        let result = SnapshotBuilder.targetedSearch(criteria, in: context)
++
++        // Only fail when the cap stopped us with nothing found — that is the case
++        // where an empty result would be misleading. When matches were found,
++        // return them even if the walk was truncated.
++        if result.capped, result.records.isEmpty {
++            throw ComputerUseError.stateUnavailable(
++                "query hit the max_nodes cap (\(maxNodes)) before finding any match. Raise max_nodes or narrow the query (add a role or more specific text)."
++            )
++        }
++
++        return result.records.map { record in
++            registerTargetedElement(record: record, context: context)
++        }
++    }
++
++    /// A snapshot carrying real window context but no rendered tree or screenshot,
++    /// so the existing action internals run unchanged against targeted elements.
++    private func liteSnapshot(context: TargetedAX.WindowContext, elements: [Int: ElementRecord]) -> AppSnapshot {
++        AppSnapshot(
++            app: context.app,
++            windowTitle: nil,
++            windowBounds: context.windowBounds,
++            targetWindowID: context.windowID,
++            targetWindowLayer: context.windowLayer,
++            screenshotPNGData: nil,
++            mode: .accessibility,
++            treeLines: [],
++            focusedSummary: nil,
++            focusedElement: context.focusedElement,
++            selectedText: nil,
++            windowElement: context.windowElement,
++            elements: elements
++        )
++    }
++
++    private func registerTargetedElement(record source: ElementRecord, context: TargetedAX.WindowContext) -> [String: Any] {
++        targetedIndexCounter += 1
++        let index = targetedIndexCounter
++        // Re-key the record to its assigned public index so lookups match.
++        let record = ElementRecord(
++            index: index,
++            identifier: source.identifier,
++            element: source.element,
++            localFrame: source.localFrame,
++            role: source.role,
++            title: source.title,
++            value: source.value,
++            rawActions: source.rawActions,
++            prettyActions: source.prettyActions,
++            isSyntheticText: source.isSyntheticText
++        )
++        targetedElements[index] = TargetedElement(record: record, context: context)
++        targetedElementOrder.append(index)
++        if targetedElementOrder.count > Self.maxTargetedElements {
++            let evicted = targetedElementOrder.removeFirst()
++            targetedElements[evicted] = nil
++        }
++        return compactRecordDictionary(record)
++    }
++
++    private func compactRecordDictionary(_ record: ElementRecord) -> [String: Any] {
++        var dict: [String: Any] = ["index": record.index]
++        if let role = record.role, !role.isEmpty { dict["role"] = role }
++        if let title = record.title, !title.isEmpty { dict["title"] = title }
++        if let value = record.value, !value.isEmpty { dict["value"] = value }
++        if let identifier = record.identifier, !identifier.isEmpty { dict["identifier"] = identifier }
++        if let frame = record.localFrame {
++            dict["bounds"] = ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height]
++        }
++        if !record.prettyActions.isEmpty { dict["actions"] = record.prettyActions }
++        return dict
++    }
++
+     @discardableResult
+     private func refreshSnapshot(
+         for query: String,
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift
+index dd5e7d3..c414edf 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ComputerUseToolDispatcher.swift
+@@ -1,3 +1,4 @@
++import CoreGraphics
+ import Foundation
+ 
+ func normalizedElementIndexArgument(_ value: Any?) -> String? {
+@@ -44,9 +45,15 @@ public final class ComputerUseToolDispatcher {
+     }
+ 
+     #if canImport(JavaScriptCore)
++    // Actions invoked from JavaScript run in JavaScript-execution mode, so the
++    // action path performs no automatic before/after snapshot (Requirement 2 of
++    // targeted-ax-speculative-execution.md). Explicit reads (get_app_state) and
++    // query still capture / search as usual.
+     private lazy var jsRuntime = JavaScriptToolRuntime(
+         toolCaller: { [unowned self] name, arguments in
+-            try self.callTool(name: name, arguments: arguments)
++            try self.service.withJavaScriptExecution {
++                try self.callTool(name: name, arguments: arguments)
++            }
+         },
+         elementsProvider: { [unowned self] app in
+             try self.service.structuredElements(app: app)
+@@ -74,6 +81,25 @@ public final class ComputerUseToolDispatcher {
+     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+         Self.logStep(name: name, arguments: arguments)
+         switch name {
++        case "prepare_agent_display":
++            return try AgentPreparation.display()
++        case "agent_app_catalog":
++            return try AgentPreparation.catalog()
++        case "prepare_app":
++            return try AgentPreparation.app(service: service, query: requireString("app", in: arguments),
++                newWindow: arguments["new_window"] as? Bool ?? false)
++        case "observe_app":
++            guard let id = arguments["window_id"] as? UInt32 else {
++                throw ComputerUseError.invalidArguments("observe_app requires window_id")
++            }
++            return try AgentPreparation.observe(query: requireString("app", in: arguments), windowID: id)
++        case "run_intent":
++            return try AppIntentExecution.run(
++                bundleID: requireString("bundle_id", in: arguments),
++                actionID: requireString("action_id", in: arguments),
++                parameters: arguments["parameters"] as? [String: Any] ?? [:],
++                input: optionalString("input", in: arguments)
++            )
+         case "list_apps":
+             return service.listApps()
+         case "get_app_state":
+@@ -135,6 +161,17 @@ public final class ComputerUseToolDispatcher {
+                 elementIndex: requireElementIndex(in: arguments),
+                 value: requireString("value", in: arguments)
+             )
++        case "query":
++            let records = try service.query(
++                app: requireString("app", in: arguments),
++                text: optionalString("text", in: arguments),
++                role: optionalString("role", in: arguments),
++                exact: (arguments["exact"] as? Bool) ?? false,
++                limit: try optionalPositiveInt("limit", in: arguments) ?? 20,
++                maxNodes: try optionalPositiveInt("max_nodes", in: arguments) ?? 500,
++                windowID: optionalDouble("window_id", in: arguments).map { CGWindowID($0) }
++            )
++            return jsonResult(records)
+         case "js":
+             #if canImport(JavaScriptCore)
+             let code = try requireString("code", in: arguments)
+@@ -151,6 +188,14 @@ public final class ComputerUseToolDispatcher {
+         }
+     }
+ 
++    private func jsonResult(_ object: Any) -> ToolCallResult {
++        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]),
++            let text = String(data: data, encoding: .utf8) else {
++            return .text("[]")
++        }
++        return .text(text)
++    }
++
+     // Live agent feedback: append a human-readable line per real action to TIDE_STEPS_FILE
+     // (set by the Tide app), which the app tails to show what the agent is doing right now.
+     private static func logStep(name: String, arguments: [String: Any]) {
+@@ -182,6 +227,7 @@ public final class ComputerUseToolDispatcher {
+         case "drag": return "Dragging\(app)"
+         case "set_value": return "Setting a field\(app)"
+         case "perform_secondary_action": return "\((arguments["action"] as? String) ?? "Action")\(app)"
++        case "query": return "Finding controls\(app)"
+         default: return nil
+         }
+     }
+@@ -208,6 +254,21 @@ public final class ComputerUseToolDispatcher {
+         public let error: String?
+     }
+ 
++    public var streamObserver: (([String: Any]) -> Void)? {
++        get {
++            #if canImport(JavaScriptCore)
++            return jsRuntime.streamObserver
++            #else
++            return nil
++            #endif
++        }
++        set {
++            #if canImport(JavaScriptCore)
++            jsRuntime.streamObserver = newValue
++            #endif
++        }
++    }
++
+     public func streamBegin(id: String) {
+         #if canImport(JavaScriptCore)
+         jsRuntime.beginStream(id: id)
+@@ -224,6 +285,15 @@ public final class ComputerUseToolDispatcher {
+         #endif
+     }
+ 
++    public func streamProgress(id: String) -> StreamProgress {
++        #if canImport(JavaScriptCore)
++        let progress = jsRuntime.streamProgress(id: id)
++        return StreamProgress(completed: progress.completed, failed: progress.failed, error: progress.error)
++        #else
++        return StreamProgress(completed: 0, failed: true, error: "js streaming is unavailable on this platform")
++        #endif
++    }
++
+     public func streamFinish(id: String, source: String?) -> ToolCallResult {
+         #if canImport(JavaScriptCore)
+         return jsRuntime.finishStream(id: id, source: source)
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift
+index fca32fe..4eec695 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/JavaScriptToolRuntime.swift
+@@ -22,6 +22,7 @@ final class JavaScriptToolRuntime {
+     private var context: JSContext
+     private var output = ""
+     private var images: [Data] = []
++    var streamObserver: (([String: Any]) -> Void)?
+     private var streamCells: [String: StreamCell] = [:]
+ 
+     /// One streamed call's record. `source` grows by prefix as the model's tool
+@@ -32,6 +33,7 @@ final class JavaScriptToolRuntime {
+     /// or abandoned stream can leave real effects already applied — the divergence
+     /// guard and `abandon` surface that, they cannot undo it.
+     private final class StreamCell {
++        var id = ""
+         var source = ""
+         var executed = 0
+         var completed = 0
+@@ -102,6 +104,7 @@ final class JavaScriptToolRuntime {
+         output = ""
+         images = []
+         streamCells[id] = StreamCell()
++        streamCells[id]?.id = id
+     }
+ 
+     struct StreamProgress {
+@@ -110,14 +113,19 @@ final class JavaScriptToolRuntime {
+         let error: String?
+     }
+ 
++    func streamProgress(id: String) -> StreamProgress {
++        let cell = streamCells[id]
++        return StreamProgress(completed: cell?.completed ?? 0,
++            failed: cell?.failed ?? true, error: cell?.error)
++    }
++
+     /// Feed the growing `code` prefix; executes every statement that has newly
+     /// completed since the last feed. The prefix must only grow. Returns how many
+     /// statements have run and whether the cell has failed.
+     @discardableResult
+     func feedStream(id: String, source: String) -> StreamProgress {
+         guard let cell = streamCells[id], !cell.finished, !cell.failed else {
+-            let cell = streamCells[id]
+-            return StreamProgress(completed: cell?.completed ?? 0, failed: cell?.failed ?? true, error: cell?.error)
++            return streamProgress(id: id)
+         }
+         guard source.hasPrefix(cell.source) else {
+             cell.failed = true
+@@ -165,35 +173,105 @@ final class JavaScriptToolRuntime {
+ 
+     private func executeNewlyComplete(_ cell: StreamCell, isFinal: Bool) {
+         let chars = Array(cell.source)
+-        while !cell.failed {
+-            if let end = Self.nextStatementEnd(chars, from: cell.executed) {
+-                let statement = String(chars[cell.executed..<end])
+-                cell.executed = end
+-                runStatement(statement, cell: cell)
+-            } else if isFinal, cell.executed < chars.count {
+-                let statement = String(chars[cell.executed..<chars.count])
+-                cell.executed = chars.count
+-                runStatement(statement, cell: cell)
+-            } else {
+-                break
++        while !cell.failed, cell.executed < chars.count {
++            guard let end = nextRunnableUnitEnd(chars, from: cell.executed, isFinal: isFinal) else { break }
++            let start = cell.executed
++            cell.executed = end
++            guard !String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
++            evaluateStreamStatement(chars, start: start, end: end, cell: cell)
++        }
++    }
++
++    /// End index (exclusive) of the next complete top-level unit at `start` that is
++    /// ready to run, or nil to wait for more input. An `if`/`try`/`do` block is held
++    /// until its `else`/`catch`/`finally`/`while` continuation — or unrelated code,
++    /// or the end of the stream — shows the unit is closed, so a half-streamed
++    /// branch never runs on its own.
++    private func nextRunnableUnitEnd(_ chars: [Character], from start: Int, isFinal: Bool) -> Int? {
++        var candidate = start
++        while let end = Self.nextStatementEnd(chars, from: candidate) {
++            let unit = String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
++            if unit.isEmpty { return end }                            // blank line: skip past it
++            if !syntaxIsComplete(unit) { candidate = end; continue }   // statement spans more lines
++            guard Self.blockAcceptsContinuation(unit) else {
++                return end                                             // ordinary complete statement
+             }
++            let rest = Self.followingCode(String(chars[end...]))
++            if rest.isEmpty { return isFinal ? end : nil }             // a continuation may still arrive
++            if Self.startsWithContinuation(rest) { candidate = end; continue }  // fold it into this unit
++            if !isFinal, Self.isPartialContinuation(rest) { return nil }        // keyword still streaming
++            return end                                                 // unrelated code follows: block closed
+         }
++        return isFinal ? chars.count : nil
+     }
+ 
+-    private func runStatement(_ statement: String, cell: StreamCell) {
+-        let trimmed = statement.trimmingCharacters(in: .whitespacesAndNewlines)
+-        guard !trimmed.isEmpty else { return }
++    private func evaluateStreamStatement(_ chars: [Character], start: Int, end: Int, cell: StreamCell) {
++        let statement = String(chars[start..<end])
++        let event: [String: Any] = [
++            "cell": cell.id, "index": cell.completed, "text": statement,
++            "start": String(chars[..<start]).utf8.count, "end": String(chars[..<end]).utf8.count,
++        ]
++        streamObserver?(event.merging(["type": "started"]) { _, new in new })
+         let contextRef = UnsafeMutableRawPointer(context.jsGlobalContextRef)
+         ocu_js_set_time_limit(contextRef, 30.0)
+-        defer { ocu_js_clear_time_limit(contextRef) }
+         context.exception = nil
+-        context.evaluateScript(trimmed)
++        context.evaluateScript(statement)
++        ocu_js_clear_time_limit(contextRef)
+         if let exception = context.exception {
+             cell.failed = true
+             cell.error = exception.toString() ?? "JavaScript error"
+             return
+         }
+         cell.completed += 1
++        streamObserver?(event.merging(["type": "done"]) { _, new in new })
++    }
++
++    private static let blockContinuationKeywords = ["else", "catch", "finally", "while"]
++
++    /// True when a unit opens with `if`/`try`/`do` — the only forms JS may continue
++    /// with a trailing else/catch/finally/while, so the only ones worth holding.
++    private static func blockAcceptsContinuation(_ unit: String) -> Bool {
++        switch String(unit.prefix { $0.isLetter }) {
++        case "if", "try", "do": return true
++        default: return false
++        }
++    }
++
++    private static func startsWithContinuation(_ code: String) -> Bool {
++        blockContinuationKeywords.contains { keyword in
++            code.hasPrefix(keyword) && !isIdentifierCharacter(code.dropFirst(keyword.count).first)
++        }
++    }
++
++    /// `code` is a nonempty strict prefix of a continuation keyword still streaming in.
++    private static func isPartialContinuation(_ code: String) -> Bool {
++        blockContinuationKeywords.contains { $0.count > code.count && $0.hasPrefix(code) }
++    }
++
++    private static func isIdentifierCharacter(_ character: Character?) -> Bool {
++        guard let character else { return false }
++        return character.isLetter || character.isNumber || character == "_" || character == "$"
++    }
++
++    private static func followingCode(_ source: String) -> String {
++        var rest = source.trimmingCharacters(in: .whitespacesAndNewlines)
++        while rest.hasPrefix("//") || rest.hasPrefix("/*") {
++            if rest.hasPrefix("//") {
++                guard let newline = rest.firstIndex(of: "\n") else { return "" }
++                rest = String(rest[rest.index(after: newline)...])
++            } else {
++                guard let end = rest.range(of: "*/") else { return "" }
++                rest = String(rest[end.upperBound...])
++            }
++            rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
++        }
++        return rest
++    }
++
++    private func syntaxIsComplete(_ source: String) -> Bool {
++        let script = JSStringCreateWithUTF8CString(source)!
++        defer { JSStringRelease(script) }
++        return JSCheckScriptSyntax(context.jsGlobalContextRef, script, nil, 1, nil)
+     }
+ 
+     private func cellResult(_ cell: StreamCell) -> ToolCallResult {
+@@ -417,7 +495,14 @@ final class JavaScriptToolRuntime {
+         for (var i = 0; i < els.length; i++) { if (predicate(els[i])) { return els[i]; } }
+         return null;
+       },
+-      findAll: function (app, predicate, opts) { return this.elements(app, opts).filter(predicate); }
++      findAll: function (app, predicate, opts) { return this.elements(app, opts).filter(predicate); },
++      // Targeted native AX lookup: no snapshot, no screenshot. Returns matching
++      // controls, each with an `index` usable by the actions above (click,
++      // setValue, scroll, secondaryAction). Requires text and/or role.
++      // criteria: { text?, role?, exact?, limit?, max_nodes?, window_id? }
++      query: function (app, criteria) {
++        return JSON.parse(this.call('query', Object.assign({ app: app }, criteria || {})).text);
++      }
+     };
+     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };
+     globalThis.emitImage = function (base64) { return __ocuEmitImage(String(base64)); };
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/PiBridgeServer.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/PiBridgeServer.swift
+index 3270d28..d43e20e 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/PiBridgeServer.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/PiBridgeServer.swift
+@@ -13,7 +13,8 @@ import Foundation
+ ///   {"op":"reply","id":"<id>","result":{...}}   // host-tool reply; unused here, ignored
+ /// Frames out (bridge -> pi, one JSON object per line on stdout):
+ ///   {"type":"ready","pid":<int>}                                  // once, at start
+-///   {"type":"done","cell":"<id>","index":<int>}                   // per completed statement
++///   {"type":"started","cell":"<id>","index":<int>,"text":"...","start":<int>,"end":<int>}
++///   {"type":"done","cell":"<id>","index":<int>,...}               // completed statement
+ ///   {"type":"output","cell":"<id>","text":"<str>"}                // text the code wrote
+ ///   {"type":"image","cell":"<id>","data":"<b64>","mimeType":"<str>"}
+ ///   {"type":"terminal","cell":"<id>","status":"done"|"failed","error":"<str>"?}
+@@ -22,13 +23,29 @@ public final class OpenComputerUsePiBridgeServer {
+     private var begun: Set<String> = []
+     private var reported: [String: Int] = [:]
+     private var closed: Set<String> = []
++    private var pendingFrames: [String] = []
++    private var outputFrame: ((String) -> Void)?
+ 
+     public init(service: ComputerUseService = ComputerUseService()) {
+         self.dispatcher = ComputerUseToolDispatcher(service: service)
++        installObserver()
+     }
+ 
+     public init(dispatcher: ComputerUseToolDispatcher) {
+         self.dispatcher = dispatcher
++        installObserver()
++    }
++
++    private func installObserver() {
++        dispatcher.streamObserver = { [weak self] event in
++            guard let self else { return }
++            let line = Self.encode(event)
++            if let outputFrame = self.outputFrame { outputFrame(line) }
++            else { self.pendingFrames.append(line) }
++            if event["type"] as? String == "done", let cell = event["cell"] as? String {
++                self.reported[cell, default: 0] += 1
++            }
++        }
+     }
+ 
+     /// Handle one request line; return zero or more response lines (no trailing newline).
+@@ -50,10 +67,10 @@ public final class OpenComputerUsePiBridgeServer {
+             return handleSource(cell: cell, source: source, final: final)
+         case "abandon":
+             guard let cell = object["cell"] as? String, !closed.contains(cell) else { return [] }
+-            _ = dispatcher.streamAbandon(id: cell)
++            let result = dispatcher.streamAbandon(id: cell)
+             let ran = reported[cell] ?? 0
+             close(cell)
+-            return [Self.encode(["type": "terminal", "cell": cell, "status": "failed",
++            return drainResult(cell: cell, result: result) + [Self.encode(["type": "terminal", "cell": cell, "status": "failed",
+                                  "error": "abandoned after \(ran) statements"])]
+         case "reply":
+             return []
+@@ -69,26 +86,23 @@ public final class OpenComputerUsePiBridgeServer {
+             reported[cell] = 0
+         }
+ 
++        pendingFrames = []
+         if final {
+             let result = dispatcher.streamFinish(id: cell, source: source)
+-            var lines = drainResult(cell: cell, result: result)
+-            let isError = (result.asDictionary["isError"] as? Bool) ?? false
+-            lines.append(Self.encode(["type": "terminal", "cell": cell,
+-                                      "status": isError ? "failed" : "done"]))
++            var lines = pendingFrames + drainResult(cell: cell, result: result)
++            let progress = dispatcher.streamProgress(id: cell)
++            var terminal: [String: Any] = ["type": "terminal", "cell": cell,
++                "status": progress.failed ? "failed" : "done"]
++            if let error = progress.error { terminal["error"] = error }
++            lines.append(Self.encode(terminal))
+             close(cell)
+             return lines
+         }
+ 
+         let progress = dispatcher.streamFeed(id: cell, source: source)
+-        var lines: [String] = []
+-        let already = reported[cell] ?? 0
+-        if progress.completed > already {
+-            for index in already..<progress.completed {
+-                lines.append(Self.encode(["type": "done", "cell": cell, "index": index]))
+-            }
+-            reported[cell] = progress.completed
+-        }
++        var lines = pendingFrames
+         if progress.failed {
++            lines += drainResult(cell: cell, result: dispatcher.streamFinish(id: cell, source: nil))
+             lines.append(Self.encode(["type": "terminal", "cell": cell, "status": "failed",
+                                       "error": progress.error ?? "statement failed"]))
+             close(cell)
+@@ -127,6 +141,7 @@ public final class OpenComputerUsePiBridgeServer {
+     public func run() {
+         setvbuf(stdout, nil, _IONBF, 0)
+         print(Self.encode(["type": "ready", "pid": Int(ProcessInfo.processInfo.processIdentifier)]))
++        outputFrame = { print($0) }
+         while let line = readLine(strippingNewline: true) {
+             for response in handle(line: line) {
+                 print(response)
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift
+index 2dfe3ad..14b9147 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/SoftwareCursorOverlay.swift
+@@ -345,6 +345,17 @@ enum SoftwareCursorOverlay {
+         }
+     }
+ 
++    /// Multiplier on the synchronous cursor-animation durations (move glide and
++    /// click pulse), which run on the calling thread and so add to per-action
++    /// latency. Default 0.15 (~6x faster than the modeled macOS cursor) keeps a
++    /// quick hint of motion; OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE overrides it
++    /// (1.0 = original, lower = faster, 0 = instant).
++    static var motionDurationScale: Double {
++        guard let raw = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE"],
++              let value = Double(raw) else { return 0.15 }
++        return max(0, value)
++    }
++
+     private static func animateMove(from start: CGPoint, to end: CGPoint, relativeTo targetWindow: CursorTargetWindow?) {
+         let candidate = bestMotionCandidate(from: start, to: end, relativeTo: targetWindow)
+         let path = candidate.path
+@@ -354,7 +365,7 @@ enum SoftwareCursorOverlay {
+         let duration = OfficialCursorMotionModel.calibratedTravelDuration(
+             distance: distanceBetween(start, end),
+             measurement: candidate.measurement
+-        )
++        ) * motionDurationScale
+         let springTargetDuration = OfficialCursorMotionModel.closeEnoughTime
+         let startTime = CACurrentMediaTime()
+         var progress: CGFloat = 0
+@@ -548,7 +559,7 @@ enum SoftwareCursorOverlay {
+         let pulseBias: CGFloat = mouseButton == .right ? 0.82 : 1
+ 
+         for pulse in 0..<clickCount {
+-            let duration = 0.16
++            let duration = 0.16 * motionDurationScale
+             let startTime = CACurrentMediaTime()
+ 
+             while true {
+@@ -572,7 +583,7 @@ enum SoftwareCursorOverlay {
+             }
+ 
+             if pulse < clickCount - 1 {
+-                pause(for: 0.05)
++                pause(for: 0.05 * motionDurationScale)
+             }
+         }
+ 
+diff --git a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ToolDefinitions.swift b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ToolDefinitions.swift
+index 146c862..af5b399 100644
+--- a/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ToolDefinitions.swift
++++ b/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/ToolDefinitions.swift
+@@ -161,6 +161,26 @@ public enum ToolDefinitions {
+                 required: ["app", "text"]
+             )
+         ),
++        ToolDefinition(
++            name: "query",
++            description: "Targeted accessibility lookup: find controls in the app's chosen window using native AX search, with no full snapshot or screenshot. Returns matching controls, each with an `index` usable by the element actions (click, set_value, scroll, perform_secondary_action). Requires text and/or role. This tool is part of plugin `Computer Use`.",
++            annotations: readOnlyAnnotations(),
++            inputSchema: objectSchema(
++                properties: [
++                    "app": stringProperty(description: "App name or bundle identifier"),
++                    "text": stringProperty(description: "Match text in the control's title, description or value. Case-insensitive substring unless exact is true."),
++                    "role": stringProperty(description: "Match this accessibility role (the AX prefix is optional, e.g. button or AXButton)"),
++                    "exact": [
++                        "type": "boolean",
++                        "description": "Require a complete text match instead of a substring. Defaults to false.",
++                    ],
++                    "limit": positiveIntegerProperty(description: "Maximum matches to return. Defaults to 20."),
++                    "max_nodes": positiveIntegerProperty(description: "Node cap for the fallback traversal when the app has no native search. Defaults to 500."),
++                    "window_id": numberProperty(description: "Search this specific window (CGWindowID) instead of the app's current window."),
++                ],
++                required: ["app"]
++            )
++        ),
+     ]
+ 
+     /// The only tool advertised over MCP. Every action is reachable from inside
+@@ -219,6 +239,17 @@ Actions (each throws on a tool error; catch with try/catch):
+   cua.listApps()
+   cua.call(tool, args)       // low-level escape hatch: returns { text, images }
+ 
++Speculative path: predict several steps per call. query() finds controls with a \
++native AX search and NO snapshot or screenshot, returning an `index` you pass to \
++the ordinary actions. Under js, actions do not auto-capture state, so a burst \
++runs without a snapshot between steps; call getState/getAppState only when you \
++must read a result back.
++  cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
++    -> [{ index, role, title, description, value, identifier, bounds, actions }]
++    // requires text and/or role; then e.g. cua.click(app, { element_index: r[0].index })
++An index stays tied to its control for this runtime; re-query after the UI \
++changes rather than reusing a stale index.
++
+ Example:
+   const send = cua.find("Slack", e => e.role === "AXButton" && /send/i.test(e.title || ""));
+   if (send) { cua.click("Slack", { element_index: send.index }); }
+diff --git a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/JavaScriptToolRuntimeTests.swift b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/JavaScriptToolRuntimeTests.swift
+index c53c5f4..f3d2ee5 100644
+--- a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/JavaScriptToolRuntimeTests.swift
++++ b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/JavaScriptToolRuntimeTests.swift
+@@ -53,6 +53,41 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
+         XCTAssertEqual(seen?["element_index"] as? String, "7")
+     }
+ 
++    func testQueryParsesRecordsAndPassesCriteria() {
++        var seen: [String: Any]?
++        let rt = runtime { tool, args in
++            if tool == "query" {
++                seen = args
++                return .text("[{\"index\":1000001,\"role\":\"AXButton\",\"title\":\"New Note\"}]")
++            }
++            return .text("")
++        }
++        let result = rt.run(
++            code: "const r = cua.query(\"Notes\", { text: \"note\", role: \"AXButton\" }); write(r[0].index + \"|\" + r.length);",
++            timeoutMs: 5000
++        )
++        XCTAssertFalse(result.isError)
++        XCTAssertEqual(result.primaryText, "1000001|1")
++        XCTAssertEqual(seen?["app"] as? String, "Notes")
++        XCTAssertEqual(seen?["role"] as? String, "AXButton")
++        XCTAssertEqual(seen?["text"] as? String, "note")
++    }
++
++    func testQueriedIndexFlowsIntoExistingClick() {
++        var clickArgs: [String: Any]?
++        let rt = runtime { tool, args in
++            if tool == "query" { return .text("[{\"index\":1000002,\"role\":\"AXButton\"}]") }
++            if tool == "click" { clickArgs = args }
++            return .text("ok")
++        }
++        _ = rt.run(
++            code: "const r = cua.query(\"Notes\", { role: \"AXButton\" }); cua.click(\"Notes\", { element_index: r[0].index });",
++            timeoutMs: 5000
++        )
++        XCTAssertEqual(clickArgs?["app"] as? String, "Notes")
++        XCTAssertEqual(clickArgs?["element_index"] as? Int, 1000002)
++    }
++
+     func testToolErrorBecomesAThrownError() {
+         let rt = runtime { _, _ in .text("no such window", isError: true) }
+         let result = rt.run(code: "cua.click(\"Ghost\");", timeoutMs: 5000)
+diff --git a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift
+index 612208d..f8ab8cd 100644
+--- a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift
++++ b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/OpenComputerUseKitTests.swift
+@@ -258,9 +258,10 @@ final class OpenComputerUseKitTests: XCTestCase {
+ 
+     func testDiscreteDefinitionsAreKeptButNotAdvertised() {
+         let discrete = Set(ToolDefinitions.discrete.map(\.name))
+-        XCTAssertEqual(discrete.count, 9)
++        XCTAssertEqual(discrete.count, 10)
+         XCTAssertTrue(discrete.contains("get_app_state"))
+         XCTAssertTrue(discrete.contains("click"))
++        XCTAssertTrue(discrete.contains("query"))
+         XCTAssertFalse(discrete.contains("js"))
+         XCTAssertFalse(ToolDefinitions.all.map(\.name).contains("get_app_state"))
+     }
+diff --git a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/PiBridgeServerTests.swift b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/PiBridgeServerTests.swift
+index 506f292..3fb621a 100644
+--- a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/PiBridgeServerTests.swift
++++ b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/PiBridgeServerTests.swift
+@@ -50,6 +50,43 @@ final class PiBridgeServerTests: XCTestCase {
+         XCTAssertTrue(bridge.handle(line: #"{"op":"source","cell":"c1","source":"write(\"x\");\nwrite(\"y\");\n","final":true}"#).isEmpty)
+     }
+ 
++    func testFinalFeedReportsAttemptedStatementAndKeepsEarlierEffect() throws {
++        let bridge = OpenComputerUsePiBridgeServer()
++        let source = "globalThis.sent = 1;\nthrow new Error('stop');\nglobalThis.sent = 2;"
++        let request = try JSONSerialization.data(withJSONObject: [
++            "op": "source", "cell": "failed", "source": source, "final": true,
++        ])
++        let frames = bridge.handle(line: String(decoding: request, as: UTF8.self)).map(decode)
++        let started = frames.filter { $0["type"] as? String == "started" }
++        XCTAssertEqual(started.count, 2)
++        XCTAssertTrue((started.last?["text"] as? String ?? "").contains("throw new Error"))
++        XCTAssertEqual(frames.filter { $0["type"] as? String == "done" }.count, 1)
++        XCTAssertEqual(frames.last?["status"] as? String, "failed")
++        let read = bridge.handle(line: #"{"op":"source","cell":"read","source":"write(globalThis.sent);","final":true}"#).map(decode)
++        XCTAssertEqual(read.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
++    }
++
++    func testIfAndTryBodiesWaitForTheirContinuation() throws {
++        for (head, tail) in [
++            ("if (true) { globalThis.ran += 1; }\n// branch follows\n", "else { globalThis.ran += 10; };\n"),
++            ("try { globalThis.ran += 1; }\n", "catch (e) { globalThis.ran += 10; };\n"),
++        ] {
++            let bridge = OpenComputerUsePiBridgeServer()
++            func feed(_ source: String, final: Bool) throws -> [[String: Any]] {
++                let data = try JSONSerialization.data(withJSONObject: [
++                    "op": "source", "cell": "control", "source": source, "final": final,
++                ])
++                return bridge.handle(line: String(decoding: data, as: UTF8.self)).map(decode)
++            }
++            let prefix = "globalThis.ran = 0;\n" + head
++            let early = try feed(prefix, final: false)
++            XCTAssertEqual(early.filter { $0["type"] as? String == "done" }.count, 1)
++            let final = try feed(prefix + tail + "write(globalThis.ran);", final: true)
++            XCTAssertEqual(final.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
++            XCTAssertEqual(final.last?["status"] as? String, "done")
++        }
++    }
++
+     func testMalformedIgnored() {
+         let bridge = OpenComputerUsePiBridgeServer()
+         XCTAssertTrue(bridge.handle(line: "not json").isEmpty)
+diff --git a/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/TargetedAXTests.swift b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/TargetedAXTests.swift
+new file mode 100644
+index 0000000..6bcae6e
+--- /dev/null
++++ b/packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/TargetedAXTests.swift
+@@ -0,0 +1,50 @@
++import XCTest
++@testable import OpenComputerUseKit
++
++/// Pure record-filter tests for the targeted lookup. The native AX search and
++/// window resolution need a live desktop (covered by the live suites); the
++/// criteria matching is pure string logic and verified here.
++final class TargetedAXTests: XCTestCase {
++    private func criteria(
++        text: String? = nil,
++        exact: Bool = false,
++        role: String? = nil
++    ) -> TargetedAX.Criteria {
++        TargetedAX.Criteria(text: text, exact: exact, role: role, limit: 20, maxNodes: 500)
++    }
++
++    func testRoleEqualsToleratesAXPrefix() {
++        XCTAssertTrue(targetedRoleEquals("AXButton", "button"))
++        XCTAssertTrue(targetedRoleEquals("AXButton", "AXButton"))
++        XCTAssertTrue(targetedRoleEquals("button", "AXButton"))
++        XCTAssertFalse(targetedRoleEquals("AXButton", "textfield"))
++        XCTAssertFalse(targetedRoleEquals(nil, "button"))
++    }
++
++    func testTextMatchesTitleDescriptionOrValueSubstring() {
++        let c = criteria(text: "compose")
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: "Compose", description: nil, value: nil))
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: nil, description: "Compose a message", value: nil))
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXTextField", title: nil, description: nil, value: "re: compose"))
++        XCTAssertFalse(targetedRecordMatches(c, role: "AXButton", title: "Send", description: nil, value: "hi"))
++    }
++
++    func testExactRequiresFullMatch() {
++        let c = criteria(text: "Compose", exact: true)
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: "compose", description: nil, value: nil))
++        XCTAssertFalse(targetedRecordMatches(c, role: "AXButton", title: "Compose mail", description: nil, value: nil))
++    }
++
++    func testRoleFilterCombinesWithText() {
++        let c = criteria(text: "send", role: "button")
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: "Send", description: nil, value: nil))
++        // right text, wrong role
++        XCTAssertFalse(targetedRecordMatches(c, role: "AXStaticText", title: "Send", description: nil, value: nil))
++    }
++
++    func testRoleOnlyMatchesAnyText() {
++        let c = criteria(role: "AXButton")
++        XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: "anything", description: nil, value: nil))
++        XCTAssertFalse(targetedRecordMatches(c, role: "AXTextField", title: "anything", description: nil, value: nil))
++    }
++}
+diff --git a/skills/open-codex-computer-use-repl/references/cua-api.md b/skills/open-codex-computer-use-repl/references/cua-api.md
+index 3d805e7..79f892e 100644
+--- a/skills/open-codex-computer-use-repl/references/cua-api.md
++++ b/skills/open-codex-computer-use-repl/references/cua-api.md
+@@ -7,7 +7,8 @@ throw an `Error` on a tool failure; catch it where failure is expected.
+ 
+ ### `cua.getState(app, opts?) -> { text, elements }`
+ Reads the app's key window once and returns both the accessibility tree text and
+-the structured `elements`. Call this before acting. `opts` accepts the same
++the structured `elements`. Request this full observation when needed; targeted
++queries and JavaScript actions do not require it. `opts` accepts the same
+ fields as the underlying state read (`text_limit`, `max_tree_nodes`,
+ `max_tree_depth`).
+ 
+@@ -26,6 +27,16 @@ Just the structured elements. Each element:
+ }
+ ```
+ 
++### `cua.query(app, criteria) -> Element[]`
++Find controls directly through AX, without a full snapshot or image.
++`criteria` accepts `text`, `role`, `exact`, `limit` (default 20), `max_nodes`
++(default 500), and `window_id`. Supply text or role. Matches stay in JavaScript;
++pass a match's index to an action. Query indexes stay attached to the same
++control across later snapshots. Re-query when that control no longer exists.
++
++JavaScript actions return a short status or throw. They do not automatically
++capture the tree or image. Several predicted actions can run in one program.
++
+ ### `cua.find(app, predicate, opts?) -> Element | null`
+ First element for which `predicate(element)` is true.
+ 
+@@ -69,6 +80,16 @@ Running and recently used apps.
+ Low-level escape hatch that calls any underlying action by name. Returns text and
+ any base64 images. Refuses `js` (no re-entry).
+ 
++### `cua.call("run_intent", { bundle_id, action_id, parameters?, input? }) -> string`
++Runs an App Intent by identity and returns its result to the next statement.
++`bundle_id` and `action_id` are the inventory's fields; `parameters` are the
++intent's own parameter keys; `input` is the Shortcut Input text.
++
++The reply is JSON. `{"installed": true, "output": ...}` is the intent's result.
++`{"installed": false, ...}` means macOS needs the generated shortcut added once:
++prepare Shortcuts, click Add Shortcut, then call `run_intent` again. Adding is
++per action and permanent — later runs go straight through.
++
+ ## Output helpers
+ 
+ - `write(value)` — append to the result; objects are JSON-stringified.

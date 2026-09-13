@@ -219,6 +219,19 @@ enum SkyKeyboardDispatcher {
 
     // MARK: - Menu-bar key equivalents
 
+    /// Press the menu item a `cmd` chord names, with no window to address: an app whose
+    /// windows are all on another Space still has a menu bar.
+    static func pressMenuItem(key: String, pid: pid_t) throws {
+        guard let equivalent = skyMenuKeyEquivalent(for: try KeyPressParser.parse(key)),
+              let item = menuItem(matching: equivalent, pid: pid) else {
+            throw ComputerUseError.message("no enabled menu item for '\(key)'")
+        }
+        let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
+        guard result == .success else {
+            throw ComputerUseError.message("could not press the menu item for '\(key)' (AXError \(result.rawValue))")
+        }
+    }
+
     private static func menuItem(matching equivalent: SkyMenuKeyEquivalent, pid: pid_t) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
         guard let menuBar = copyValue(application, kAXMenuBarAttribute) else {

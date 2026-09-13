@@ -56,7 +56,7 @@ Targeted lookup (no snapshot or screenshot):
 
 ```
 cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
-  -> [{ index, role, title, description, value, identifier, bounds, actions }]
+  -> [{ index, role, title, value, identifier, bounds, actions }]   // title falls back to the AX description
 ```
 
 `query` finds controls in the app's chosen window with the app's native AX search

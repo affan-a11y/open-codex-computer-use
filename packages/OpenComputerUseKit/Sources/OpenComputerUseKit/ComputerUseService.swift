@@ -927,9 +927,9 @@ public final class ComputerUseService {
     }
 
     private func currentSnapshot(for query: String) throws -> AppSnapshot {
+        let prepared = preparedWindows[query.lowercased()]
         if let snapshot = snapshotsByApp[query.lowercased()],
-           !javaScriptExecutionActive || preparedWindows[query.lowercased()] == nil ||
-           snapshot.targetWindowID == preparedWindows[query.lowercased()] {
+           !javaScriptExecutionActive || prepared == nil || snapshot.targetWindowID == prepared {
             return snapshot
         }
 
@@ -938,7 +938,7 @@ public final class ComputerUseService {
         // window-level input can dispatch. Element lookups against this lite
         // snapshot fail clearly, prompting an explicit getState or query.
         if javaScriptExecutionActive {
-            let context = try SnapshotBuilder.resolveTargetWindow(for: try AppDiscovery.resolve(query), windowID: preparedWindows[query.lowercased()])
+            let context = try SnapshotBuilder.resolveTargetWindow(for: try AppDiscovery.resolve(query, activate: false), windowID: prepared)
             return liteSnapshot(context: context, elements: [:])
         }
 
@@ -950,7 +950,8 @@ public final class ComputerUseService {
     /// index uses the normal current snapshot.
     private func snapshotForAction(app query: String, elementIndex: String?) throws -> AppSnapshot {
         if let elementIndex, let index = Int(elementIndex), let target = targetedElements[index] {
-            return liteSnapshot(context: target.context, elements: [index: target.record])
+            let (context, record) = SnapshotBuilder.currentGeometry(of: target.record, in: target.context)
+            return liteSnapshot(context: context, elements: [index: record])
         }
         return try currentSnapshot(for: query)
     }
@@ -985,7 +986,8 @@ public final class ComputerUseService {
             throw ComputerUseError.invalidArguments("query requires at least one of text or role")
         }
 
-        let app = try AppDiscovery.resolve(query)
+        // Read-only lookup: never steal foreground, even when the app has to launch.
+        let app = try AppDiscovery.resolve(query, activate: false)
         let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID ?? preparedWindows[query.lowercased()])
         let criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
         let result = SnapshotBuilder.targetedSearch(criteria, in: context)

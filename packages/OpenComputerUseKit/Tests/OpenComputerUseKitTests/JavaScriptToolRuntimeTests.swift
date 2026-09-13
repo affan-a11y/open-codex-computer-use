@@ -248,15 +248,102 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(typed, 1)
     }
 
-    func testNextStatementEndRespectsBracketsAndStrings() {
-        // a semicolon inside a string or braces is not a boundary
-        let a = Array("f(\"a;b\");\n")
-        XCTAssertEqual(JavaScriptToolRuntime.nextStatementEnd(a, from: 0), a.firstIndex(of: ";").map { _ in "f(\"a;b\")".count + 1 })
-        let b = Array("if (x) {\n  y();\n}\n")
-        // no top-level boundary until the closing brace's line
-        let end = JavaScriptToolRuntime.nextStatementEnd(b, from: 0)
-        XCTAssertNotNil(end)
-        XCTAssertEqual(String(b[0..<end!]).contains("}"), true)
+    func testStreamSemicolonClosesCompoundStatementPromptly() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "if (true) { globalThis.p = 1 };\n").completed, 1)
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "if (true) { globalThis.p = 1 };\ndo { globalThis.p += 1 } while (globalThis.p < 3);\n").completed, 2)
+        XCTAssertEqual(rt.finishStream(id: "c1", source: "if (true) { globalThis.p = 1 };\ndo { globalThis.p += 1 } while (globalThis.p < 3);\nwrite(globalThis.p);").primaryText, "3")
+    }
+
+    func testStreamBracelessIfWaitsForElse() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "if (false) globalThis.q = 1;\n").completed, 0)
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "if (false) globalThis.q = 1;\nelse globalThis.q = 2;\n").completed, 1)
+        let result = rt.finishStream(id: "c1", source: "if (false) globalThis.q = 1;\nelse globalThis.q = 2;\nwrite(globalThis.q);")
+        XCTAssertEqual(result.primaryText, "2")
+    }
+
+    func testStreamWhileIsNotFoldedIntoAnIf() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = "if (true) { globalThis.w = 1; }\nwhile (globalThis.w < 3) { globalThis.w += 1; }\n"
+        XCTAssertEqual(rt.feedStream(id: "c1", source: source).completed, 2)
+    }
+
+    func testStreamCommentOnlyLinesAreNotStatements() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "// plan\n/* multi\nline */\nwrite('a');\n").completed, 1)
+    }
+
+    func testStreamMultiLineStatementRunsOnceComplete() {
+        var seen: [String: Any]?
+        let rt = runtime { tool, args in
+            if tool == "query" { seen = args }
+            return .text("[]")
+        }
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "cua.query(\"Notes\", {\n  text: \"a;b\",\n").completed, 0)
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "cua.query(\"Notes\", {\n  text: \"a;b\",\n  role: \"AXButton\"\n});\n").completed, 1)
+        XCTAssertEqual(seen?["text"] as? String, "a;b")
+    }
+
+    func testStreamContinuationLinesStayOneStatement() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "globalThis.v = 8\n").completed, 0)  // next token unknown yet
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "globalThis.v = 8\n  / 2\n  / 2\nglobalThis.s = [1, 2]\n  .map(function (n) { return n * 2 })\n  .join('|')\nglobalThis.t = 1\n").completed, 2)
+        let result = rt.finishStream(id: "c1", source: "globalThis.v = 8\n  / 2\n  / 2\nglobalThis.s = [1, 2]\n  .map(function (n) { return n * 2 })\n  .join('|')\nglobalThis.t = 1\nwrite(globalThis.v + ' ' + globalThis.s + ' ' + globalThis.t);")
+        XCTAssertEqual(result.primaryText, "2 2|4 1")
+    }
+
+    func testStreamRegexAndTemplateLiteralsAreOpaque() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = "globalThis.r = /[;}]\\/{/.test('};/{') ? 'y' : 'n';\nglobalThis.u = `a${ '}' + `${ '{' }` };`;\nglobalThis.q = 4 / 2 / 1;\n"
+        XCTAssertEqual(rt.feedStream(id: "c1", source: source).completed, 3)
+        XCTAssertEqual(rt.finishStream(id: "c1", source: source + "write(globalThis.r + globalThis.u + globalThis.q);").primaryText, "ya}{;2")
+    }
+
+    func testStreamHoldsPartialContinuationKeyword() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "globalThis.k = 0;\nif (true) { globalThis.k = 1; }\nel").completed, 1)
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "globalThis.k = 0;\nif (true) { globalThis.k = 1; }\nelsewhere = 2;\n").completed, 3)
+        XCTAssertEqual(rt.finishStream(id: "c1", source: "globalThis.k = 0;\nif (true) { globalThis.k = 1; }\nelsewhere = 2;\nwrite(globalThis.k + elsewhere);").primaryText, "3")
+    }
+
+    func testStreamRunsCompleteStatementBeforeBrokenLiteral() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "globalThis.a = 1;\nglobalThis.b = \"unterminated").completed, 1)
+        let result = rt.finishStream(id: "c1")
+        XCTAssertTrue(result.isError)
+        XCTAssertEqual(rt.run(code: "write(globalThis.a);", timeoutMs: 5000).primaryText, "1")
+    }
+
+    func testStreamFollowsJavaScriptSemicolonInsertion() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = "globalThis.f = function (s) { return /a;b/.test(s) }\nglobalThis.c = 1\nglobalThis.c\n++globalThis.c\n"
+        XCTAssertEqual(rt.feedStream(id: "c1", source: source).completed, 3)  // `++` after a newline starts a new statement
+        XCTAssertEqual(rt.finishStream(id: "c1", source: source + "write(globalThis.f('xa;by') + ' ' + globalThis.c);").primaryText, "true 2")
+    }
+
+    func testStreamNonASCIISourceOffsets() {
+        var events: [[String: Any]] = []
+        let rt = runtime()
+        rt.streamObserver = { events.append($0) }
+        rt.beginStream(id: "c1")
+        let source = "globalThis.e = '😀é';\nwrite(globalThis.e);\n"
+        XCTAssertEqual(rt.feedStream(id: "c1", source: source).completed, 2)
+        let done = events.filter { $0["type"] as? String == "done" }
+        XCTAssertEqual(done.count, 2)
+        XCTAssertEqual(done.last?["start"] as? Int, "globalThis.e = '😀é';".utf8.count)  // byte offset in the cell source
+        XCTAssertEqual(done.last?["end"] as? Int, source.utf8.count - 1)  // node ends at `;`, before the newline
+        XCTAssertEqual(rt.finishStream(id: "c1").primaryText, "😀é")
     }
 
     func testScreenshotRoundTripsImage() {

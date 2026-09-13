@@ -117,6 +117,10 @@ final class SkyLightSPI: @unchecked Sendable {
     private static let hardwareCaptureWindowListSymbol = "SLSHWCaptureWindowList"
     private static let hardwareCaptureOptions: UInt32 = 0x800
     private static let applicationServicesPath = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+    // Front-process read and user-generated switch (yabai's focus pair).
+    private static let getFrontProcessSymbol = "_SLPSGetFrontProcess"
+    private static let setFrontProcessSymbol = "_SLPSSetFrontProcessWithOptions"
+    private static let userGeneratedSwitch: UInt32 = 0x200
 
     private typealias PostToPidFunction = @convention(c) (pid_t, UnsafeMutableRawPointer?) -> Void
     private typealias SetIntegerFieldFunction = @convention(c) (UnsafeMutableRawPointer?, UInt32, Int64) -> Void
@@ -134,6 +138,8 @@ final class SkyLightSPI: @unchecked Sendable {
     private typealias CopyManagedDisplaySpacesFunction = @convention(c) (UInt32) -> Unmanaged<CFArray>?
     private typealias AXElementGetWindowFunction = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
     private typealias HardwareCaptureWindowListFunction = @convention(c) (UInt32, UnsafePointer<CGWindowID>, Int32, UInt32) -> Unmanaged<CFArray>?
+    private typealias GetFrontProcessFunction = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+    private typealias SetFrontProcessFunction = @convention(c) (UnsafeRawPointer?, CGWindowID, UInt32) -> Int32
 
     private let frameworkHandle: UnsafeMutableRawPointer?
     private let applicationServicesHandle: UnsafeMutableRawPointer?
@@ -148,6 +154,8 @@ final class SkyLightSPI: @unchecked Sendable {
     private let copyManagedDisplaySpacesFunction: CopyManagedDisplaySpacesFunction?
     private let axElementGetWindowFunction: AXElementGetWindowFunction?
     private let hardwareCaptureWindowListFunction: HardwareCaptureWindowListFunction?
+    private let getFrontProcessFunction: GetFrontProcessFunction?
+    private let setFrontProcessFunction: SetFrontProcessFunction?
 
     let capability: SkyLightSPICapability
     /// Occlusion keep-alive (`WindowOcclusionKeepAlive`) is a separate optional
@@ -170,6 +178,8 @@ final class SkyLightSPI: @unchecked Sendable {
         copyManagedDisplaySpacesFunction = Self.resolve(handle: handle, symbol: Self.copyManagedDisplaySpacesSymbol)
         axElementGetWindowFunction = Self.resolve(handle: appServicesHandle, symbol: Self.axElementGetWindowSymbol)
         hardwareCaptureWindowListFunction = Self.resolve(handle: handle, symbol: Self.hardwareCaptureWindowListSymbol)
+        getFrontProcessFunction = Self.resolve(handle: handle, symbol: Self.getFrontProcessSymbol)
+        setFrontProcessFunction = Self.resolve(handle: handle, symbol: Self.setFrontProcessSymbol)
 
         var missingSymbols: [String] = []
         if postToPidFunction == nil {
@@ -208,6 +218,16 @@ final class SkyLightSPI: @unchecked Sendable {
         return (result as? [NSNumber])?.map(\.uint64Value)
     }
 
+    /// Full-screen (type 4) Space ids on every display; empty when the symbol is absent.
+    func fullScreenSpaces() -> Set<UInt64> {
+        guard let mainConnectionFunction, let copyManagedDisplaySpacesFunction,
+              let displays = copyManagedDisplaySpacesFunction(mainConnectionFunction())?.takeRetainedValue() as? [[String: Any]]
+        else { return [] }
+        return Set(displays.flatMap { ($0["Spaces"] as? [[String: Any]]) ?? [] }.compactMap { space in
+            (space["type"] as? NSNumber)?.intValue == 4 ? (space["id64"] as? NSNumber)?.uint64Value : nil
+        })
+    }
+
     /// User (type 0) Space ids per display, keyed by display identifier.
     func managedDisplaySpaces() -> [String: [UInt64]]? {
         guard let mainConnectionFunction, let copyManagedDisplaySpacesFunction else { return nil }
@@ -233,6 +253,19 @@ final class SkyLightSPI: @unchecked Sendable {
         else { return nil }
         let image = unsafeBitCast(CFArrayGetValueAtIndex(array, 0), to: CGImage.self)
         return image.width > 0 && image.height > 0 ? image : nil
+    }
+
+    /// The front process's serial number; nil when the symbol is absent.
+    func frontProcess() -> [UInt8]? {
+        guard let getFrontProcessFunction else { return nil }
+        var psn = [UInt8](repeating: 0, count: 8)
+        return getFrontProcessFunction(&psn) == 0 ? psn : nil
+    }
+
+    /// Make `psn` the front process again, as a user-generated switch, if it no longer is.
+    func restoreFrontProcess(_ psn: [UInt8]) {
+        guard let setFrontProcessFunction, let current = frontProcess(), current != psn else { return }
+        _ = psn.withUnsafeBytes { setFrontProcessFunction($0.baseAddress, 0, Self.userGeneratedSwitch) }
     }
 
     /// CGWindowID behind an AX window element.

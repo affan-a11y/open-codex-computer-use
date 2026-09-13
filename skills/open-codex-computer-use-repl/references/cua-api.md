@@ -34,6 +34,14 @@ Find controls directly through AX, without a full snapshot or image.
 pass a match's index to an action. Query indexes stay attached to the same
 control across later snapshots. Re-query when that control no longer exists.
 
+### `cua.waitFor(app, criteria, { timeout_ms?, interval_ms? }) -> Element[]`
+`cua.query`, repeated until it matches or `timeout_ms` (default 5000, at most
+25000) passes; returns `[]` on timeout instead of throwing. Use it after a key
+press or click that changes the screen, before the next query.
+
+### `cua.sleep(ms)`
+Pause the program up to 10 s.
+
 JavaScript actions return a short status or throw. They do not automatically
 capture the tree or image. Several predicted actions can run in one program.
 
@@ -68,7 +76,8 @@ Scroll an element up/down/left/right by `pages` (default 1).
 Drag between two screenshot pixel coordinates.
 
 ### `cua.setValue(app, element_index, value) -> string`
-Set a settable element's value directly — preferred for editable fields.
+Set a settable element's value directly — preferred for editable fields. An
+empty string clears the field.
 
 ### `cua.secondaryAction(app, element_index, action) -> string`
 Invoke a secondary accessibility action named in an element's `actions`.

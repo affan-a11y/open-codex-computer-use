@@ -67,6 +67,8 @@ final class AgentDisplay: @unchecked Sendable {
     private(set) var displayID: CGDirectDisplayID = 0
     private(set) var displaySpaceIDs: Set<UInt64> = []
     private var parked: [CGWindowID: ParkedWindow] = [:]
+    /// Windows that were closed before the agent reopened them; restoring closes them again.
+    private var reopened: Set<CGWindowID> = []
     private var exitHookInstalled = false
 
     var isSupported: Bool {
@@ -141,6 +143,36 @@ final class AgentDisplay: @unchecked Sendable {
         }
     }
 
+    /// On-screen app windows and their frames, keyed by window ID.
+    private static func onScreenWindows() -> [CGWindowID: (pid: pid_t, frame: CGRect)] {
+        let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var windows: [CGWindowID: (pid: pid_t, frame: CGRect)] = [:]
+        for info in infoList where (info[kCGWindowLayer as String] as? Int) == 0 {
+            guard let number = info[kCGWindowNumber as String] as? NSNumber,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let dictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dictionary) else { continue }
+            windows[number.uint32Value] = (pid, frame)
+        }
+        return windows
+    }
+
+    /// macOS puts windows back on a display it has seen before, and the agent display always has
+    /// the same identity: a window still on an earlier agent display when it went away (a run that
+    /// ended without restoring) reappears on every new one, off the user's screen. Move each such
+    /// window back to where the user had it. Moving it while the display exists also makes macOS
+    /// forget it, so the next agent display leaves it alone.
+    private func returnRestoredWindows(_ before: [CGWindowID: (pid: pid_t, frame: CGRect)], from bounds: CGRect) {
+        for (windowID, window) in before where parked[windowID] == nil && !bounds.intersects(window.frame) {
+            guard let frame = Self.windowFrame(windowID), bounds.intersects(frame) else { continue }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(window.pid), kAXWindowsAttribute as CFString, &value) == .success,
+                  let element = (value as? [AXUIElement])?.first(where: { SkyLightSPI.shared.windowID(for: $0) == windowID })
+            else { continue }
+            try? setAXPosition(element, window.frame.origin)
+        }
+    }
+
     private static func windowFrame(_ windowID: CGWindowID) -> CGRect? {
         let infoList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
         for info in infoList {
@@ -152,7 +184,39 @@ final class AgentDisplay: @unchecked Sendable {
         return nil
     }
 
-    /// Put a parked window back where it was.
+    /// Close a window parked here with its own close button, so no other window of the app
+    /// is touched (a menu's Close Window acts on whichever window is main).
+    func close(windowID: CGWindowID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = parked[windowID] else {
+            throw ComputerUseError.stateUnavailable("window \(windowID) is not parked on the agent display")
+        }
+        var button: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(entry.element, kAXCloseButtonAttribute as CFString, &button) == .success,
+              let button, AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success else {
+            throw ComputerUseError.stateUnavailable("window \(windowID) has no close button to press")
+        }
+        parked[windowID] = nil
+        destroyDisplayIfIdle()
+    }
+
+    /// Close a window again when it is restored: the user had it closed before the agent reopened it.
+    func closeWhenRestored(_ windowID: CGWindowID) {
+        lock.lock()
+        defer { lock.unlock() }
+        reopened.insert(windowID)
+    }
+
+    /// Press a window's close button, as the user had it closed.
+    private func close(_ windowID: CGWindowID, _ element: AXUIElement) {
+        guard reopened.remove(windowID) != nil else { return }
+        var button: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &button) == .success, let button {
+            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+        }
+    }
+
     func restore(windowID: CGWindowID) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -161,6 +225,7 @@ final class AgentDisplay: @unchecked Sendable {
         }
         let start = TimingLog.now()
         try setAXPosition(entry.element, entry.originalPosition)
+        close(windowID, entry.element)
         let back = waitUntil(timeout: Self.moveSettle) {
             guard let frame = Self.windowFrame(windowID) else { return false }
             return abs(frame.minX - entry.originalPosition.x) < 1 && abs(frame.minY - entry.originalPosition.y) < 1
@@ -175,8 +240,9 @@ final class AgentDisplay: @unchecked Sendable {
     func restoreAll() {
         lock.lock()
         defer { lock.unlock() }
-        for entry in parked.values {
+        for (windowID, entry) in parked {
             try? setAXPosition(entry.element, entry.originalPosition)
+            close(windowID, entry.element)
         }
         if !parked.isEmpty {
             Thread.sleep(forTimeInterval: Self.moveFallbackSettle)
@@ -196,6 +262,8 @@ final class AgentDisplay: @unchecked Sendable {
         }
         let spi = SkyLightSPI.shared
         let spacesBefore = Set((spi.managedDisplaySpaces() ?? [:]).values.flatMap { $0 })
+        let frontBefore = spi.frontProcess()
+        let windowsBefore = Self.onScreenWindows()
         let start = TimingLog.now()
         var newHandle: UnsafeMutableRawPointer?
         let id = ocu_virtual_display_create("Open Computer Use", UInt32(Self.displaySize.width), UInt32(Self.displaySize.height), 60, &newHandle)
@@ -210,6 +278,8 @@ final class AgentDisplay: @unchecked Sendable {
         // it a Space; without the Space SPI, fall back to a fixed settle.
         var newSpaces: Set<UInt64> = []
         let ready = waitUntil(timeout: Self.displaySettle) {
+            // Focus moves while the display comes up; give it back as soon as it does (see below).
+            if let frontBefore { spi.restoreFrontProcess(frontBefore) }
             guard let bounds = self.displayBounds, !bounds.isEmpty else { return false }
             guard let displays = spi.managedDisplaySpaces() else { return true }
             newSpaces = Set(displays.values.flatMap { $0 }).subtracting(spacesBefore)
@@ -223,6 +293,11 @@ final class AgentDisplay: @unchecked Sendable {
             Thread.sleep(forTimeInterval: Self.displayFallbackSettle)
         }
         displaySpaceIDs = newSpaces
+        // A new display hands activation to the last regular app. When the user is typing in an
+        // accessory app (a menu-bar composer), that moves their keystrokes into the app behind.
+        // The agent display must not move the user's focus: give it back.
+        if let frontBefore { spi.restoreFrontProcess(frontBefore) }
+        returnRestoredWindows(windowsBefore, from: displayBounds ?? .zero)
         TimingLog.log("agent_display.ready", since: start)
         return displayBounds ?? .zero
     }

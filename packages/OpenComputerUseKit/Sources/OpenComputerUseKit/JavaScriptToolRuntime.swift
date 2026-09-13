@@ -33,8 +33,10 @@ final class JavaScriptToolRuntime {
     /// or abandoned stream can leave real effects already applied — the divergence
     /// guard and `abandon` surface that, they cannot undo it.
     private final class StreamCell {
-        var id = ""
+        let id: String
+        init(id: String) { self.id = id }
         var source = ""
+        /// UTF-16 offset in `source` up to which statements have run.
         var executed = 0
         var completed = 0
         var finished = false
@@ -103,8 +105,7 @@ final class JavaScriptToolRuntime {
     func beginStream(id: String) {
         output = ""
         images = []
-        streamCells[id] = StreamCell()
-        streamCells[id]?.id = id
+        streamCells[id] = StreamCell(id: id)
     }
 
     struct StreamProgress {
@@ -171,45 +172,33 @@ final class JavaScriptToolRuntime {
         return cellResult(cell)
     }
 
+    /// Run every statement the parser reports as complete and no longer extendable.
+    /// On the final feed, whatever trails the last complete statement runs as-is so
+    /// JavaScriptCore surfaces its syntax error.
     private func executeNewlyComplete(_ cell: StreamCell, isFinal: Bool) {
-        let chars = Array(cell.source)
-        while !cell.failed, cell.executed < chars.count {
-            guard let end = nextRunnableUnitEnd(chars, from: cell.executed, isFinal: isFinal) else { break }
-            let start = cell.executed
-            cell.executed = end
-            guard !String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            evaluateStreamStatement(chars, start: start, end: end, cell: cell)
+        let source = cell.source
+        let base = cell.executed
+        let remainder = String(source[String.Index(utf16Offset: base, in: source)...])
+        let scan = StreamStatementParser.shared.scan(remainder, isFinal: isFinal)
+        for end in scan.ends where !cell.failed {
+            evaluateStreamStatement(cell, through: base + end)
+        }
+        let total = source.utf16.count
+        if isFinal, !cell.failed, cell.executed < total, !scan.restIsBlank {
+            evaluateStreamStatement(cell, through: total)
         }
     }
 
-    /// End index (exclusive) of the next complete top-level unit at `start` that is
-    /// ready to run, or nil to wait for more input. An `if`/`try`/`do` block is held
-    /// until its `else`/`catch`/`finally`/`while` continuation — or unrelated code,
-    /// or the end of the stream — shows the unit is closed, so a half-streamed
-    /// branch never runs on its own.
-    private func nextRunnableUnitEnd(_ chars: [Character], from start: Int, isFinal: Bool) -> Int? {
-        var candidate = start
-        while let end = Self.nextStatementEnd(chars, from: candidate) {
-            let unit = String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if unit.isEmpty { return end }                            // blank line: skip past it
-            if !syntaxIsComplete(unit) { candidate = end; continue }   // statement spans more lines
-            guard Self.blockAcceptsContinuation(unit) else {
-                return end                                             // ordinary complete statement
-            }
-            let rest = Self.followingCode(String(chars[end...]))
-            if rest.isEmpty { return isFinal ? end : nil }             // a continuation may still arrive
-            if Self.startsWithContinuation(rest) { candidate = end; continue }  // fold it into this unit
-            if !isFinal, Self.isPartialContinuation(rest) { return nil }        // keyword still streaming
-            return end                                                 // unrelated code follows: block closed
-        }
-        return isFinal ? chars.count : nil
-    }
-
-    private func evaluateStreamStatement(_ chars: [Character], start: Int, end: Int, cell: StreamCell) {
-        let statement = String(chars[start..<end])
+    private func evaluateStreamStatement(_ cell: StreamCell, through end: Int) {
+        let source = cell.source
+        let startIndex = String.Index(utf16Offset: cell.executed, in: source)
+        let endIndex = String.Index(utf16Offset: end, in: source)
+        let statement = String(source[startIndex..<endIndex])
+        cell.executed = end
         let event: [String: Any] = [
             "cell": cell.id, "index": cell.completed, "text": statement,
-            "start": String(chars[..<start]).utf8.count, "end": String(chars[..<end]).utf8.count,
+            "start": source.utf8.distance(from: source.startIndex, to: startIndex),
+            "end": source.utf8.distance(from: source.startIndex, to: endIndex),
         ]
         streamObserver?(event.merging(["type": "started"]) { _, new in new })
         let contextRef = UnsafeMutableRawPointer(context.jsGlobalContextRef)
@@ -226,54 +215,6 @@ final class JavaScriptToolRuntime {
         streamObserver?(event.merging(["type": "done"]) { _, new in new })
     }
 
-    private static let blockContinuationKeywords = ["else", "catch", "finally", "while"]
-
-    /// True when a unit opens with `if`/`try`/`do` — the only forms JS may continue
-    /// with a trailing else/catch/finally/while, so the only ones worth holding.
-    private static func blockAcceptsContinuation(_ unit: String) -> Bool {
-        switch String(unit.prefix { $0.isLetter }) {
-        case "if", "try", "do": return true
-        default: return false
-        }
-    }
-
-    private static func startsWithContinuation(_ code: String) -> Bool {
-        blockContinuationKeywords.contains { keyword in
-            code.hasPrefix(keyword) && !isIdentifierCharacter(code.dropFirst(keyword.count).first)
-        }
-    }
-
-    /// `code` is a nonempty strict prefix of a continuation keyword still streaming in.
-    private static func isPartialContinuation(_ code: String) -> Bool {
-        blockContinuationKeywords.contains { $0.count > code.count && $0.hasPrefix(code) }
-    }
-
-    private static func isIdentifierCharacter(_ character: Character?) -> Bool {
-        guard let character else { return false }
-        return character.isLetter || character.isNumber || character == "_" || character == "$"
-    }
-
-    private static func followingCode(_ source: String) -> String {
-        var rest = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        while rest.hasPrefix("//") || rest.hasPrefix("/*") {
-            if rest.hasPrefix("//") {
-                guard let newline = rest.firstIndex(of: "\n") else { return "" }
-                rest = String(rest[rest.index(after: newline)...])
-            } else {
-                guard let end = rest.range(of: "*/") else { return "" }
-                rest = String(rest[end.upperBound...])
-            }
-            rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return rest
-    }
-
-    private func syntaxIsComplete(_ source: String) -> Bool {
-        let script = JSStringCreateWithUTF8CString(source)!
-        defer { JSStringRelease(script) }
-        return JSCheckScriptSyntax(context.jsGlobalContextRef, script, nil, 1, nil)
-    }
-
     private func cellResult(_ cell: StreamCell) -> ToolCallResult {
         var text = output
         if cell.failed, let error = cell.error {
@@ -285,64 +226,6 @@ final class JavaScriptToolRuntime {
         content.append(contentsOf: images.map { .pngImage($0) })
         if content.isEmpty { content.append(.text("(no output)")) }
         return ToolCallResult(content: content, isError: cell.failed)
-    }
-
-    /// Index just past the next top-level statement boundary (`;` or newline at
-    /// bracket depth 0, outside strings/templates/comments), or nil if the current
-    /// prefix has no complete statement left.
-    ///
-    /// ponytail: naive scanner (does not re-enter string parsing inside `${}`, and
-    /// does not distinguish a regex literal from division). Swap for a real JS
-    /// parser (meriyah, as Codex bundles) if models hit the edges.
-    static func nextStatementEnd(_ chars: [Character], from start: Int) -> Int? {
-        var i = start
-        var depth = 0
-        while i < chars.count {
-            let c = chars[i]
-            if c == "/", i + 1 < chars.count, chars[i + 1] == "/" {
-                while i < chars.count, chars[i] != "\n" { i += 1 }
-                continue
-            }
-            if c == "/", i + 1 < chars.count, chars[i + 1] == "*" {
-                i += 2
-                while i + 1 < chars.count, !(chars[i] == "*" && chars[i + 1] == "/") { i += 1 }
-                i = min(i + 2, chars.count)
-                continue
-            }
-            if c == "\"" || c == "'" {
-                i += 1
-                while i < chars.count {
-                    if chars[i] == "\\" { i += 2; continue }
-                    if chars[i] == c { i += 1; break }
-                    i += 1
-                }
-                continue
-            }
-            if c == "`" {
-                i += 1
-                while i < chars.count {
-                    if chars[i] == "\\" { i += 2; continue }
-                    if chars[i] == "`" { i += 1; break }
-                    if chars[i] == "$", i + 1 < chars.count, chars[i + 1] == "{" {
-                        i += 2
-                        var braces = 1
-                        while i < chars.count, braces > 0 {
-                            if chars[i] == "{" { braces += 1 }
-                            else if chars[i] == "}" { braces -= 1 }
-                            i += 1
-                        }
-                        continue
-                    }
-                    i += 1
-                }
-                continue
-            }
-            if c == "(" || c == "[" || c == "{" { depth += 1; i += 1; continue }
-            if c == ")" || c == "]" || c == "}" { depth = max(0, depth - 1); i += 1; continue }
-            if depth == 0, c == ";" || c == "\n" { return i + 1 }
-            i += 1
-        }
-        return nil
     }
 
     private func configure(_ ctx: JSContext) {
@@ -371,6 +254,14 @@ final class JavaScriptToolRuntime {
             self.nativeElements(app: app)
         }
         ctx.setObject(elementsBlock, forKeyedSubscript: "__ocuElements" as NSString)
+
+        // A pause inside a statement, for cua.waitFor: the UI needs a beat after a
+        // key press or click before its new controls exist. Capped well under the
+        // 30 s a streamed statement may run.
+        let sleepBlock: @convention(block) (Double) -> Void = { milliseconds in
+            Thread.sleep(forTimeInterval: max(0, min(milliseconds, 10_000)) / 1000)
+        }
+        ctx.setObject(sleepBlock, forKeyedSubscript: "__ocuSleep" as NSString)
 
         // Generative UI: the agent emits polished component trees for important steps, and a
         // one-line status narration, streamed to TIDE_UI_FILE for the Tide app to render.
@@ -502,6 +393,18 @@ final class JavaScriptToolRuntime {
       // criteria: { text?, role?, exact?, limit?, max_nodes?, window_id? }
       query: function (app, criteria) {
         return JSON.parse(this.call('query', Object.assign({ app: app }, criteria || {})).text);
+      },
+      sleep: function (ms) { __ocuSleep(Number(ms) || 0); },
+      // query, repeated until it matches or timeout_ms (default 5000) passes; [] on timeout.
+      waitFor: function (app, criteria, opts) {
+        var timeout = Math.min((opts && opts.timeout_ms) || 5000, 25000);
+        var every = (opts && opts.interval_ms) || 250;
+        var until = Date.now() + timeout;
+        for (;;) {
+          var found = this.query(app, criteria);
+          if (found.length || Date.now() >= until) { return found; }
+          __ocuSleep(Math.min(every, Math.max(0, until - Date.now())));
+        }
       }
     };
     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };

@@ -146,9 +146,13 @@ failure includes the native error. Prior prints are delivered on failure and
 abandonment as well as success. An attempted statement without `done` may have
 partially acted; do not replay it automatically.
 
-JavaScriptCore checks syntax before execution. An unfinished control structure
-stays buffered. A closing brace waits for possible `else`, `catch`, or `finally`
-continuations, including intervening comments. Use a semicolon after a complete
-compound statement to finish it promptly, or finish the cell. Semicolons are
-also recommended for ordinary statements. The boundary scanner is still the
-existing conservative scanner; source it cannot separate is checked at finish.
+Statement boundaries come from a real JavaScript parser (acorn, vendored in
+`Vendor/AcornJavaScript.swift`, run in its own JavaScriptCore context), so
+strings, templates, regex literals, comments and semicolon insertion are handled
+exactly as the engine does. A complete statement runs as soon as nothing that
+has streamed in could still extend it: `if` waits for a possible `else`, `try`
+for `finally`, and an expression without `;` waits until the next token has
+fully arrived (`el` may still become `else`). A `;`-terminated statement or a
+closed block runs at once. A complete statement followed by a broken literal
+still runs. On the final feed everything complete runs, then any leftover
+source is executed as-is so JavaScriptCore reports its syntax error.
