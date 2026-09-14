@@ -448,50 +448,136 @@ final class JavaScriptToolRuntime {
         (res.images || []).forEach(function (i) { __ocuEmitImage(i); });
         return { text: res.text };
       },
+      // The app a call acts in when it names none: set cua.app once, then leave it out.
+      app: null,
+      // Every call took the app first; it still may. A first argument that is not an app
+      // (an object, a number, a key, text alone) means the call is on cua.app.
+      _app: function (candidate) {
+        if (typeof candidate === 'string' && candidate) { return candidate; }
+        if (this.app) { return this.app; }
+        throw new Error('no app: set cua.app = "<bundle id>" or pass the app first');
+      },
+      _split: function (args, isApp) {
+        // (app, rest...) or (rest...): the caller says which first argument is an app
+        var list = Array.prototype.slice.call(args);
+        if (list.length && isApp(list)) { return { app: this._app(list[0]), rest: list.slice(1) }; }
+        return { app: this._app(null), rest: list };
+      },
+      _byRole: function (list) { return typeof list[0] === 'string'; },
+      _byShape: function (list) { return typeof list[0] === 'string' && list.length > 1 && typeof list[1] !== 'object'; },
+      _byPair: function (list) { return typeof list[0] === 'string' && list.length > 1; },
       listApps: function () { return this.call('list_apps', {}).text; },
-      getAppState: function (app, opts) { return this.call('get_app_state', Object.assign({ app: app }, opts || {})).text; },
-      click: function (app, opts) { return this.call('click', Object.assign({ app: app }, opts || {})).text; },
-      type: function (app, text, opts) { return this.call('type_text', Object.assign({ app: app, text: text }, opts || {})).text; },
-      pressKey: function (app, key, opts) { return this.call('press_key', Object.assign({ app: app, key: key }, opts || {})).text; },
-      scroll: function (app, direction, element_index, pages) { return this.call('scroll', { app: app, direction: direction, element_index: element_index, pages: (pages == null ? 1 : pages) }).text; },
-      drag: function (app, fromX, fromY, toX, toY) { return this.call('drag', { app: app, from_x: fromX, from_y: fromY, to_x: toX, to_y: toY }).text; },
-      setValue: function (app, element_index, value) { return this.call('set_value', { app: app, element_index: element_index, value: value }).text; },
-      secondaryAction: function (app, element_index, action) { return this.call('perform_secondary_action', { app: app, element_index: element_index, action: action }).text; },
-      screenshot: function (app, opts) { return this.call('get_app_state', Object.assign({ app: app }, opts || {})).text; },
-      getState: function (app, opts) {
-        var text = this.call('get_app_state', Object.assign({ app: app }, opts || {})).text;
-        var res = JSON.parse(__ocuElements(app));
-        if (res.isError) { throw new Error(res.text || ('elements failed: ' + app)); }
+      getAppState: function () { var a = this._split(arguments, this._byRole); return this.call('get_app_state', Object.assign({ app: a.app }, a.rest[0] || {})).text; },
+      screenshot: function () { return this.getAppState.apply(this, arguments); },
+      // click({ text? , role?, element_index?, x?, y? }): a control named by criteria is
+      // waited for (timeout_ms, default 3000) and clicked; none there is an error.
+      click: function () {
+        var a = this._split(arguments, this._byRole), opts = a.rest[0] || {};
+        var t = this._target(a.app, opts);
+        return this.call('click', Object.assign({ app: a.app }, t)).text;
+      },
+      type: function () { var a = this._split(arguments, this._byPair); return this.call('type_text', Object.assign({ app: a.app, text: a.rest[0] }, a.rest[1] || {})).text; },
+      pressKey: function () { var a = this._split(arguments, this._byPair); return this.call('press_key', Object.assign({ app: a.app, key: a.rest[0] }, a.rest[1] || {})).text; },
+      press: function () { return this.pressKey.apply(this, arguments); },
+      scroll: function () {
+        var a = this._split(arguments, function (l) { return typeof l[0] === 'string' && !/^(up|down|left|right)$/.test(l[0]); });
+        var r = a.rest;
+        return this.call('scroll', { app: a.app, direction: r[0], element_index: this._index(a.app, r[1]), pages: (r[2] == null ? 1 : r[2]) }).text;
+      },
+      drag: function () { var a = this._split(arguments, this._byRole), r = a.rest; return this.call('drag', { app: a.app, from_x: r[0], from_y: r[1], to_x: r[2], to_y: r[3] }).text; },
+      setValue: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('set_value', { app: a.app, element_index: this._index(a.app, r[0]), value: r[1] }).text; },
+      secondaryAction: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('perform_secondary_action', { app: a.app, element_index: this._index(a.app, r[0]), action: r[1] }).text; },
+      getState: function () {
+        var a = this._split(arguments, this._byRole);
+        var text = this.call('get_app_state', Object.assign({ app: a.app }, a.rest[0] || {})).text;
+        var res = JSON.parse(__ocuElements(a.app));
+        if (res.isError) { throw new Error(res.text || ('elements failed: ' + a.app)); }
         return { text: text, elements: res.elements };
       },
-      elements: function (app, opts) { return this.getState(app, opts).elements; },
-      find: function (app, predicate, opts) {
-        var els = this.elements(app, opts);
+      elements: function () { return this.getState.apply(this, arguments).elements; },
+      find: function () {
+        var a = this._split(arguments, this._byRole), predicate = a.rest[0];
+        var els = this.elements(a.app, a.rest[1]);
         for (var i = 0; i < els.length; i++) { if (predicate(els[i])) { return els[i]; } }
         return null;
       },
-      findAll: function (app, predicate, opts) { return this.elements(app, opts).filter(predicate); },
+      findAll: function () { var a = this._split(arguments, this._byRole); return this.elements(a.app, a.rest[1]).filter(a.rest[0]); },
       // Targeted native AX lookup: no snapshot, no screenshot. Returns matching
-      // controls, each with an `index` usable by the actions above (click,
-      // setValue, scroll, secondaryAction). Requires text and/or role.
+      // controls, each with an `index` usable by the actions above.
       // criteria: { text?, role?, exact?, limit?, max_nodes?, window_id? }
-      query: function (app, criteria) {
-        return JSON.parse(this.call('query', Object.assign({ app: app }, criteria || {})).text);
+      query: function () {
+        var a = this._split(arguments, this._byRole);
+        return JSON.parse(this.call('query', Object.assign({ app: a.app }, a.rest[0] || {})).text);
       },
       sleep: function (ms) { __ocuSleep(Number(ms) || 0); },
-      // query, repeated until it matches or timeout_ms (default 5000, 0 queries once) passes; [] on timeout.
+      // A control given as criteria is waited for; an index or a record is used as is.
+      _index: function (app, control) {
+        if (control && typeof control === 'object') {
+          if (control.index != null) { return control.index; }
+          return this._target(app, control).element_index;
+        }
+        return control;
+      },
+      _target: function (app, opts) {
+        if (opts.element_index != null || opts.x != null) { return opts; }
+        if (opts.index != null) { return Object.assign({}, opts, { element_index: opts.index, index: undefined }); }
+        if (!opts.text && !opts.role) { return opts; }
+        var criteria = { text: opts.text, role: opts.role, exact: opts.exact, limit: opts.limit, max_nodes: opts.max_nodes, window_id: opts.window_id };
+        var found = this.waitFor(app, criteria, { timeout_ms: opts.timeout_ms != null ? opts.timeout_ms : 3000 });
+        var hit = null;
+        for (var i = 0; i < found.length; i++) { if (found[i].bounds && found[i].bounds.w > 0 && found[i].bounds.h > 0) { hit = found[i]; break; } }
+        if (!hit) { throw new Error('no control matching ' + JSON.stringify(criteria) + ' in ' + app); }
+        var rest = Object.assign({}, opts);
+        delete rest.text; delete rest.role; delete rest.exact; delete rest.limit; delete rest.max_nodes; delete rest.window_id; delete rest.timeout_ms;
+        rest.element_index = hit.index;
+        return rest;
+      },
+      // query, repeated until it matches; [] once the screen has settled without it (the
+      // search saw the same nodes for 0.7 s, checked from 1.5 s on) or when timeout_ms
+      // (default 5000, 0 queries once) passes. A miss costs seconds, not the whole budget.
       // No query starts past the deadline: one more could reach the statement's 30 s limit.
-      waitFor: function (app, criteria, opts) {
+      waitFor: function () {
+        var a = this._split(arguments, this._byRole), criteria = a.rest[0] || {}, opts = a.rest[1];
         var timeout = Math.min(opts && opts.timeout_ms != null ? Number(opts.timeout_ms) : 5000, 25000);
         var every = (opts && opts.interval_ms) || 250;
-        var until = Date.now() + timeout;
-        var found = this.query(app, criteria);
-        while (!found.length && Date.now() < until) {
+        var start = Date.now(), until = start + timeout;
+        var probe = Object.assign({ app: a.app, probe: true }, criteria);
+        var seen = null, since = start;
+        var res = JSON.parse(this.call('query', probe).text);
+        while (!res.records.length && Date.now() < until) {
+          if (res.digest !== seen) { seen = res.digest; since = Date.now(); }
+          else if (res.digest && Date.now() - since >= 700 && Date.now() - start >= 1500) { return []; }
           __ocuSleep(Math.min(every, until - Date.now()));
           if (Date.now() >= until) { return []; }
-          found = this.query(app, criteria);
+          res = JSON.parse(this.call('query', probe).text);
         }
-        return found;
+        return res.records;
+      },
+      // any([criteria, ...], opts): the first candidate present, polled like waitFor; its
+      // records carry `which`, the candidate's position. [] when none came.
+      any: function () {
+        var a = this._split(arguments, this._byRole), candidates = a.rest[0] || [], opts = a.rest[1];
+        var timeout = Math.min(opts && opts.timeout_ms != null ? Number(opts.timeout_ms) : 5000, 25000);
+        var start = Date.now(), until = start + timeout, seen = null, since = start;
+        for (;;) {
+          var digest = null;
+          for (var i = 0; i < candidates.length; i++) {
+            var res = JSON.parse(this.call('query', Object.assign({ app: a.app, probe: true }, candidates[i])).text);
+            if (res.records.length) { return res.records.map(function (r) { r.which = i; return r; }); }
+            if (i === 0) { digest = res.digest; }
+          }
+          if (digest !== seen) { seen = digest; since = Date.now(); }
+          else if (digest && Date.now() - since >= 700 && Date.now() - start >= 1500) { return []; }
+          if (Date.now() + 250 >= until) { return []; }
+          __ocuSleep(250);
+        }
+      },
+      // Learned intents the host defined for this run: run("name", input) runs one.
+      intents: {},
+      run: function (name, input) {
+        var f = this.intents[name];
+        if (!f) { throw new Error('no learned intent named ' + name); }
+        return f(input || {});
       }
     };
     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };

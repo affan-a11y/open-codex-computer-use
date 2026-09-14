@@ -994,6 +994,22 @@ public final class ComputerUseService {
         maxNodes: Int = 500,
         windowID: CGWindowID? = nil
     ) throws -> [[String: Any]] {
+        try probe(app: query, text: text, role: role, exact: exact, limit: limit, maxNodes: maxNodes, windowID: windowID).records
+    }
+
+    /// `query`, with the fingerprint of what the search saw: a caller polling for a
+    /// control gives up once two reads agree without it, instead of waiting out its
+    /// timeout. An exact miss is retried as a substring match, each record then
+    /// carrying `match: "contains"`: a label that differs by a word is the common miss.
+    public func probe(
+        app query: String,
+        text: String? = nil,
+        role: String? = nil,
+        exact: Bool = false,
+        limit: Int = 20,
+        maxNodes: Int = 500,
+        windowID: CGWindowID? = nil
+    ) throws -> (records: [[String: Any]], digest: String?) {
         guard (text.map { !$0.isEmpty } ?? false) || (role.map { !$0.isEmpty } ?? false) else {
             throw ComputerUseError.invalidArguments("query requires at least one of text or role")
         }
@@ -1001,8 +1017,14 @@ public final class ComputerUseService {
         // Read-only lookup: never steal foreground, even when the app has to launch.
         let app = try AppDiscovery.resolve(query, activate: false)
         let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID ?? preparedWindows[query.lowercased()])
-        let criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
-        let result = SnapshotBuilder.targetedSearch(criteria, in: context)
+        var criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
+        var result = SnapshotBuilder.targetedSearch(criteria, in: context)
+        var forgiven = false
+        if exact, result.records.isEmpty, !result.capped {
+            criteria.exact = false
+            result = SnapshotBuilder.targetedSearch(criteria, in: context)
+            forgiven = !result.records.isEmpty
+        }
 
         // Only fail when the cap stopped us with nothing found — that is the case
         // where an empty result would be misleading. When matches were found,
@@ -1013,9 +1035,12 @@ public final class ComputerUseService {
             )
         }
 
-        return result.records.map { record in
-            registerTargetedElement(record: record, context: context)
+        let records = result.records.map { record -> [String: Any] in
+            var registered = registerTargetedElement(record: record, context: context)
+            if forgiven { registered["match"] = "contains" }
+            return registered
         }
+        return (records, result.digest)
     }
 
     /// A snapshot carrying real window context but no rendered tree or screenshot,

@@ -2290,6 +2290,10 @@ enum TargetedAX {
         /// True when the bounded traversal hit its node cap before exhausting the
         /// window subtree, so absence of a match is not conclusive.
         let capped: Bool
+        /// A fingerprint of what the traversal saw (role, title, value of every visited
+        /// node), so a caller polling for a control can tell a screen that has settled
+        /// without it from one still changing. Nil on the native search path.
+        var digest: String? = nil
     }
 }
 
@@ -2315,6 +2319,12 @@ extension SnapshotBuilder {
         let rootWindow: AXUIElement
         if let windowID, let named = windowElement(for: windowID, appElement: appElement) {
             rootWindow = named
+        } else if let windowID, let replacement = windowOnAgentDisplay(appElement: appElement) {
+            // The prepared window is gone (a page change can replace it). Another window of
+            // the app on the agent display is what the program meant; the person's own
+            // windows are never substituted.
+            TimingLog.note("window_id \(windowID) is gone; using the app's window on the agent display")
+            rootWindow = replacement
         } else if let windowID {
             throw ComputerUseError.stateUnavailable("window_id \(windowID) is not a current window of \(app.bundleIdentifier ?? app.name).")
         } else if let focused = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
@@ -2359,6 +2369,17 @@ extension SnapshotBuilder {
         return (context, fresh)
     }
 
+    /// The app's first window that sits on one of the agent display's Spaces.
+    private static func windowOnAgentDisplay(appElement: AXUIElement) -> AXUIElement? {
+        let spaces = AgentDisplay.shared.displaySpaceIDs
+        guard !spaces.isEmpty else { return nil }
+        let spi = SkyLightSPI.shared
+        return copyArray(appElement, attribute: kAXWindowsAttribute)?.first { window in
+            guard let id = spi.windowID(for: window), let on = spi.spaces(forWindow: id) else { return false }
+            return !spaces.isDisjoint(with: on)
+        }
+    }
+
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
         copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
             SkyLightSPI.shared.windowID(for: $0) == windowID
@@ -2390,7 +2411,9 @@ extension SnapshotBuilder {
         let windowElement = context.windowElement
 
         // Native optimized search, when the app offers it: results are already the
-        // matching set, so just build records (still stop at `limit`).
+        // matching set, so just build records (still stop at `limit`). A miss falls
+        // through to the walk below: a poller needs its digest to know the screen has
+        // settled, and the walk matches labels the native search skipped.
         if let native = predicateSearch(root: windowElement, searchText: criteria.text, resultsLimit: limit * 4) {
             var records: [ElementRecord] = []
             for element in native {
@@ -2399,7 +2422,9 @@ extension SnapshotBuilder {
                 records.append(makeRecord(element, scan: scan, windowBounds: context.windowBounds))
                 if records.count >= limit { break }
             }
-            return TargetedAX.SearchResult(records: records, capped: false)
+            if !records.isEmpty {
+                return TargetedAX.SearchResult(records: records, capped: false)
+            }
         }
 
         // Bounded BFS with interleaved matching and early stop. Off-screen
@@ -2416,6 +2441,7 @@ extension SnapshotBuilder {
         var head = 0
         var visited = 0
         var capped = false
+        var digest = Hasher()
         while head < queue.count {
             if visited >= budget { capped = true; break }
             let element = queue[head]
@@ -2423,6 +2449,7 @@ extension SnapshotBuilder {
             visited += 1
 
             let scan = batchScan(element)
+            digest.combine(scan.role); digest.combine(scan.title); digest.combine(scan.value)
 
             if visited == 1 {
                 // The window itself is the clip; never prune it.
@@ -2439,7 +2466,7 @@ extension SnapshotBuilder {
 
             queue.append(contentsOf: searchChildren(of: element, role: scan.role))
         }
-        return TargetedAX.SearchResult(records: records, capped: capped)
+        return TargetedAX.SearchResult(records: records, capped: capped, digest: String(digest.finalize()))
     }
 
     // Roles whose children are a potentially huge row set (file lists, tables,

@@ -327,6 +327,81 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(ranges.last?.1, source.utf8.count - 1)
     }
 
+    func testWaitForGivesUpOnceTheScreenHasSettledWithoutTheControl() {
+        var polls = 0
+        let rt = runtime { tool, args in
+            XCTAssertEqual(tool, "query")
+            XCTAssertEqual(args["probe"] as? Bool, true)
+            polls += 1
+            return .text(#"{"records":[],"digest":"same screen"}"#)
+        }
+        let start = Date()
+        let result = rt.run(code: "write(JSON.stringify(cua.waitFor('X', {text: 'Send'}, {timeout_ms: 8000})));", timeoutMs: 20000)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(result.primaryText, "[]")
+        XCTAssertLessThan(elapsed, 3)  // not the 8 s asked for
+        XCTAssertGreaterThan(polls, 3)
+    }
+
+    func testWaitForKeepsPollingWhileTheScreenChanges() {
+        var polls = 0
+        let rt = runtime { _, _ in
+            polls += 1
+            return .text(polls < 12 ? #"{"records":[],"digest":"\#(polls)"}"# : #"{"records":[{"index":7}],"digest":"x"}"#)
+        }
+        let result = rt.run(code: "write(cua.waitFor('X', {text: 'Send'}, {timeout_ms: 8000, interval_ms: 20})[0].index);", timeoutMs: 20000)
+        XCTAssertEqual(result.primaryText, "7")
+    }
+
+    func testCallsActInCuaAppWhenNoAppIsNamed() {
+        var seen: [(String, [String: Any])] = []
+        let rt = runtime { tool, args in
+            seen.append((tool, args))
+            return tool == "query" ? .text(#"{"records":[{"index":4,"bounds":{"x":1,"y":2,"w":3,"h":4}}],"digest":"d"}"#) : .text("ok")
+        }
+        let result = rt.run(code: """
+            cua.app = "com.apple.Notes";
+            cua.type("hi");
+            cua.press("Return");
+            cua.setValue(9, "");
+            cua.click({text: "Send"});
+            cua.type("com.apple.Safari", "elsewhere");
+            """, timeoutMs: 20000)
+        XCTAssertFalse(result.isError, result.primaryText ?? "")
+        let apps = seen.map { ($0.1["app"] as? String) ?? "-" }
+        XCTAssertEqual(seen.map(\.0), ["type_text", "press_key", "set_value", "query", "click", "type_text"])
+        XCTAssertEqual(apps, ["com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Safari"])
+        XCTAssertEqual(seen[4].1["element_index"] as? Int, 4)  // click by criteria resolved the control
+        XCTAssertNil(seen[4].1["text"])
+        XCTAssertEqual(seen[2].1["element_index"] as? Int, 9)
+    }
+
+    func testClickByCriteriaFailsPlainlyWhenNothingMatches() {
+        let rt = runtime { tool, _ in
+            tool == "query" ? .text(#"{"records":[],"digest":"same"}"#) : .text("ok")
+        }
+        let result = rt.run(code: "cua.click('X', {text: 'Send'});", timeoutMs: 20000)
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.primaryText?.contains("no control matching") == true)
+    }
+
+    func testAnyReturnsTheFirstCandidatePresent() {
+        let rt = runtime { tool, args in
+            XCTAssertEqual(tool, "query")
+            let text = args["text"] as? String ?? ""
+            return .text(text == "New message" ? #"{"records":[{"index":7}],"digest":"d"}"# : #"{"records":[],"digest":"d"}"#)
+        }
+        let result = rt.run(code: "var r = cua.any('X', [{text: 'Compose'}, {text: 'New message'}]); write(r[0].index + ':' + r[0].which);", timeoutMs: 20000)
+        XCTAssertEqual(result.primaryText, "7:1")
+    }
+
+    func testRunCallsALearnedIntentByName() {
+        let rt = runtime()
+        _ = rt.run(code: "cua.intents['open_channel'] = (function () { function run(input) { write('opened ' + input.channel); return 1; } return run; })();", timeoutMs: 5000)
+        XCTAssertEqual(rt.run(code: "cua.run('open_channel', {channel: 'general'});", timeoutMs: 5000).primaryText, "opened general")
+        XCTAssertTrue(rt.run(code: "cua.run('nope');", timeoutMs: 5000).isError)
+    }
+
     func testStreamSemicolonClosesCompoundStatementPromptly() {
         let rt = runtime()
         rt.beginStream(id: "c1")

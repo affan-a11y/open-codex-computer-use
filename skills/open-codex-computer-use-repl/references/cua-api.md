@@ -1,23 +1,21 @@
 # `cua` API reference
 
-All calls are synchronous. `app` is an app name or bundle identifier. Actions
-throw an `Error` on a tool failure; catch it where failure is expected.
+All calls are synchronous. Set `cua.app = "<bundle id>"` once and leave the app out
+of every call; a call may still name an app first (a bundle id or app name) to act
+elsewhere for that one call. Actions throw an `Error` on a tool failure.
 
-## Reading state
+## Finding controls
 
-### `cua.getState(app, opts?) -> { text, elements }`
-Reads the app's key window once and returns both the accessibility tree text and
-the structured `elements`. Request this full observation when needed; targeted
-queries and JavaScript actions do not require it. `opts` accepts the same
-fields as the underlying state read (`text_limit`, `max_tree_nodes`,
-`max_tree_depth`).
-
-### `cua.elements(app, opts?) -> Element[]`
-Just the structured elements. Each element:
+### `cua.query(criteria) -> Element[]`
+Find controls through AX, with no snapshot or image. `criteria`: `text`
+(case-insensitive substring; a whole-label match with `exact: true`, retried as a
+substring when nothing matches whole — such records carry `match: "contains"`),
+`role` (the `AX` prefix optional), `limit` (default 20), `max_nodes` (default
+1500), `window_id`. Supply text or role. Each element:
 
 ```
 {
-  index: number,        // pass as element_index to actions
+  index: number,        // pass as element_index, or pass the element itself
   role: string,         // e.g. "AXButton", "AXTextField"
   title?: string,       // visible label
   value?: string,       // current value/text
@@ -27,89 +25,62 @@ Just the structured elements. Each element:
 }
 ```
 
-### `cua.query(app, criteria) -> Element[]`
-Find controls directly through AX, without a full snapshot or image.
-`criteria` accepts `text`, `role`, `exact`, `limit` (default 20), `max_nodes`
-(default 500), and `window_id`. Supply text or role. Matches stay in JavaScript;
-pass a match's index to an action. Query indexes stay attached to the same
-control across later snapshots. Re-query when that control no longer exists.
+An index stays tied to its control for this runtime; re-query when the control no
+longer exists.
 
-### `cua.waitFor(app, criteria, { timeout_ms?, interval_ms? }) -> Element[]`
-`cua.query`, repeated until it matches or `timeout_ms` (default 5000, at most
-25000; 0 queries once) passes; returns `[]` on timeout instead of throwing. Use it after a key
-press or click that changes the screen, before the next query.
+### `cua.waitFor(criteria, { timeout_ms?, interval_ms? }) -> Element[]`
+`query`, repeated until it matches. Returns `[]` once the screen has settled
+without a match (the same nodes for 0.7 s, checked from 1.5 s on) or when
+`timeout_ms` (default 5000, at most 25000; 0 queries once) passes. Use it after a
+key press or click that changes the screen.
+
+### `cua.any([criteria, ...], { timeout_ms? }) -> Element[]`
+The first candidate present, polled like `waitFor`. Records carry `which`, the
+candidate's position. `[]` when none came. One call for "the Compose button, or
+the New message item, or the Send field".
 
 ### `cua.sleep(ms)`
 Pause the program up to 10 s.
 
-JavaScript actions return a short status or throw. They do not automatically
-capture the tree or image. Several predicted actions can run in one program.
-
-### `cua.find(app, predicate, opts?) -> Element | null`
-First element for which `predicate(element)` is true.
-
-### `cua.findAll(app, predicate, opts?) -> Element[]`
-Every matching element.
-
-### `cua.getAppState(app, opts?) -> string`
-The tree text only (no structured elements).
-
-### `cua.screenshot(app, opts?) -> string`
-Returns the tree text and emits the window screenshot into the result.
-
 ## Acting
 
-### `cua.click(app, { element_index?, x?, y?, click_method? }) -> string`
-Click an element by index (preferred) or by screenshot pixel coordinates.
-`click_method` is usually omitted (auto).
+A control argument is criteria (`{ text, role, exact?, timeout_ms? }`), an element
+from a query, or an index. Criteria are waited for (default 3000 ms) and the first
+match with visible bounds is used; none there throws `no control matching …`.
 
-### `cua.type(app, text, { key_method? }) -> string`
-Type literal text into the focused element.
-
-### `cua.pressKey(app, key, { key_method? }) -> string`
-Press a key or chord using xdotool syntax, e.g. `"Return"`, `"super+c"`, `"Tab"`.
-
-### `cua.scroll(app, direction, element_index, pages?) -> string`
-Scroll an element up/down/left/right by `pages` (default 1).
-
-### `cua.drag(app, from_x, from_y, to_x, to_y) -> string`
-Drag between two screenshot pixel coordinates.
-
-### `cua.setValue(app, element_index, value) -> string`
-Set a settable element's value directly — preferred for editable fields. An
-empty string clears the field.
-
-### `cua.secondaryAction(app, element_index, action) -> string`
-Invoke a secondary accessibility action named in an element's `actions`.
-
-### `cua.listApps() -> string`
-Running and recently used apps.
+### `cua.click({ text? | role? | element_index? | x?, y?, click_method? }) -> string`
+### `cua.type(text, { key_method? }) -> string` — into the focused element.
+### `cua.press(key)` / `cua.pressKey(key)` — xdotool syntax: `"Return"`, `"super+l"`.
+### `cua.setValue(control, value) -> string` — preferred for editable fields; `""` clears.
+### `cua.secondaryAction(control, action) -> string` — an action named in `actions`.
+### `cua.scroll(direction, control, pages?) -> string`
+### `cua.drag(from_x, from_y, to_x, to_y) -> string`
+### `cua.run(name, input) -> any`
+Runs a learned intent the host defined for this run by name (they are listed in
+`<app_intents>`), with its `inputs`. Its result feeds the next statement.
 
 ### `cua.call(tool, args) -> { text }`
-Low-level escape hatch that calls any underlying action by name. Returns the text;
-any image the tool took is shown to the model with the cell's result, never to the
-program. Refuses `js` (no re-entry).
+Any underlying action by name. Any image the tool took is shown to the model with
+the cell's result, never to the program. Refuses `js`.
 
-### `cua.call("restore_prepared_window", { window_id }) -> string`
-Puts a window `prepare_app` parked back where the user had it while the app
-keeps running. A window `prepare_app` opened (Dock reopen or `new_window`) is
-the agent's and is closed instead; one that appeared because the app was
-launched is moved home and left to the app. The window stops being the app's
-default target. `close_prepared_window` takes the same argument and closes any
-parked window. Either call answers `closed <id>` when the window is gone, also
-when the app had already taken it down; a window a sheet holds open survives
-either call and is reported `still open`, back on the user's screen. Both error
-when the window is not parked.
+`cua.call("run_intent", { bundle_id, action_id, parameters?, input? })` runs an
+App Intent from the inventory; the reply is JSON: `{"installed": true, "output":
+…}` is its result, `{"installed": false, …}` means macOS needs the generated
+shortcut added once (prepare Shortcuts, click Add Shortcut, call again).
 
-### `cua.call("run_intent", { bundle_id, action_id, parameters?, input? }) -> string`
-Runs an App Intent by identity and returns its result to the next statement.
-`bundle_id` and `action_id` are the inventory's fields; `parameters` are the
-intent's own parameter keys; `input` is the Shortcut Input text.
+`cua.call("restore_prepared_window", { window_id })` puts a parked window back
+where the user had it (a window `prepare_app` opened is closed instead);
+`close_prepared_window` takes the same argument and closes any parked window.
+Both answer `closed <id>` when the window is gone and `still open` when a sheet
+holds it.
 
-The reply is JSON. `{"installed": true, "output": ...}` is the intent's result.
-`{"installed": false, ...}` means macOS needs the generated shortcut added once:
-prepare Shortcuts, click Add Shortcut, then call `run_intent` again. Adding is
-per action and permanent — later runs go straight through.
+## Reading state
+
+### `cua.getState(opts?) -> { text, elements }` — the key window's tree text and elements.
+### `cua.elements(opts?) -> Element[]`
+### `cua.find(predicate, opts?) -> Element | null` / `cua.findAll(predicate, opts?)`
+### `cua.getAppState(opts?) -> string` — the tree text only.
+### `cua.listApps() -> string`
 
 ## Output helpers
 
@@ -118,8 +89,6 @@ per action and permanent — later runs go straight through.
 
 ## Runtime notes
 
-- Synchronous; no `await`. Each call is its own scope; use `globalThis` to
-  persist across calls, or `reset: true` to clear.
-- Default timeout 30000 ms; raise `timeout_ms` for longer flows.
-- macOS only (JavaScriptCore). Requires Accessibility and Screen Recording
-  permissions, same as the underlying actions.
+- Synchronous; no `await`. Each call is its own scope; `globalThis` persists.
+- A statement may run 30 s; `waitFor` and `any` keep under it.
+- macOS only (JavaScriptCore). Requires Accessibility and Screen Recording.
