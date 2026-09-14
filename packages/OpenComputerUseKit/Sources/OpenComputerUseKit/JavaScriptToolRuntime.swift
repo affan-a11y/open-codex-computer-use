@@ -473,9 +473,13 @@ final class JavaScriptToolRuntime {
       // waited for (timeout_ms, default 3000) and clicked; none there is an error.
       click: function () {
         var a = this._split(arguments, this._byRole), opts = a.rest[0] || {};
-        var t = this._target(a.app, opts);
+        var t = this._target(a.app, opts, this._pressable);
         return this.call('click', Object.assign({ app: a.app }, t)).text;
       },
+      // Roles an action prefers among the controls a label names: the button over its
+      // caption, the field over its label. Anything else only when none of these match.
+      _pressable: /button|link|menu|check|radio|tab|row|cell|popup|disclosure|image|toolbar|outline/i,
+      _editable: /textfield|textarea|combobox|searchfield|text field|text area/i,
       type: function () { var a = this._split(arguments, this._byPair); return this.call('type_text', Object.assign({ app: a.app, text: a.rest[0] }, a.rest[1] || {})).text; },
       pressKey: function () { var a = this._split(arguments, this._byPair); return this.call('press_key', Object.assign({ app: a.app, key: a.rest[0] }, a.rest[1] || {})).text; },
       press: function () { return this.pressKey.apply(this, arguments); },
@@ -485,8 +489,8 @@ final class JavaScriptToolRuntime {
         return this.call('scroll', { app: a.app, direction: r[0], element_index: this._index(a.app, r[1]), pages: (r[2] == null ? 1 : r[2]) }).text;
       },
       drag: function () { var a = this._split(arguments, this._byRole), r = a.rest; return this.call('drag', { app: a.app, from_x: r[0], from_y: r[1], to_x: r[2], to_y: r[3] }).text; },
-      setValue: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('set_value', { app: a.app, element_index: this._index(a.app, r[0]), value: r[1] }).text; },
-      secondaryAction: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('perform_secondary_action', { app: a.app, element_index: this._index(a.app, r[0]), action: r[1] }).text; },
+      setValue: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('set_value', { app: a.app, element_index: this._index(a.app, r[0], this._editable), value: r[1] }).text; },
+      secondaryAction: function () { var a = this._split(arguments, this._byPair), r = a.rest; return this.call('perform_secondary_action', { app: a.app, element_index: this._index(a.app, r[0], this._pressable), action: r[1] }).text; },
       getState: function () {
         var a = this._split(arguments, this._byRole);
         var text = this.call('get_app_state', Object.assign({ app: a.app }, a.rest[0] || {})).text;
@@ -505,27 +509,36 @@ final class JavaScriptToolRuntime {
       // Targeted native AX lookup: no snapshot, no screenshot. Returns matching
       // controls, each with an `index` usable by the actions above.
       // criteria: { text?, role?, exact?, limit?, max_nodes?, window_id? }
+      // Text names the whole label unless exact: false; a whole-label miss is retried as a
+      // substring by the harness ("To" must not match "Photos").
+      _criteria: function (criteria) {
+        var c = Object.assign({}, criteria || {});
+        if (c.text && c.exact == null) { c.exact = true; }
+        return c;
+      },
       query: function () {
         var a = this._split(arguments, this._byRole);
-        return JSON.parse(this.call('query', Object.assign({ app: a.app }, a.rest[0] || {})).text);
+        return JSON.parse(this.call('query', Object.assign({ app: a.app }, this._criteria(a.rest[0]))).text);
       },
       sleep: function (ms) { __ocuSleep(Number(ms) || 0); },
       // A control given as criteria is waited for; an index or a record is used as is.
-      _index: function (app, control) {
+      _index: function (app, control, prefer) {
         if (control && typeof control === 'object') {
           if (control.index != null) { return control.index; }
-          return this._target(app, control).element_index;
+          return this._target(app, control, prefer).element_index;
         }
         return control;
       },
-      _target: function (app, opts) {
+      _target: function (app, opts, prefer) {
         if (opts.element_index != null || opts.x != null) { return opts; }
         if (opts.index != null) { return Object.assign({}, opts, { element_index: opts.index, index: undefined }); }
         if (!opts.text && !opts.role) { return opts; }
         var criteria = { text: opts.text, role: opts.role, exact: opts.exact, limit: opts.limit, max_nodes: opts.max_nodes, window_id: opts.window_id };
         var found = this.waitFor(app, criteria, { timeout_ms: opts.timeout_ms != null ? opts.timeout_ms : 3000 });
+        var visible = found.filter(function (e) { return e.bounds && e.bounds.w > 0 && e.bounds.h > 0; });
         var hit = null;
-        for (var i = 0; i < found.length; i++) { if (found[i].bounds && found[i].bounds.w > 0 && found[i].bounds.h > 0) { hit = found[i]; break; } }
+        if (prefer && !opts.role) { hit = visible.filter(function (e) { return prefer.test(e.role || ''); })[0] || null; }
+        if (!hit) { hit = visible[0] || null; }
         if (!hit) { throw new Error('no control matching ' + JSON.stringify(criteria) + ' in ' + app); }
         var rest = Object.assign({}, opts);
         delete rest.text; delete rest.role; delete rest.exact; delete rest.limit; delete rest.max_nodes; delete rest.window_id; delete rest.timeout_ms;
@@ -541,7 +554,7 @@ final class JavaScriptToolRuntime {
         var timeout = Math.min(opts && opts.timeout_ms != null ? Number(opts.timeout_ms) : 5000, 25000);
         var every = (opts && opts.interval_ms) || 250;
         var start = Date.now(), until = start + timeout;
-        var probe = Object.assign({ app: a.app, probe: true }, criteria);
+        var probe = Object.assign({ app: a.app, probe: true }, this._criteria(criteria));
         var seen = null, since = start;
         var res = JSON.parse(this.call('query', probe).text);
         while (!res.records.length && Date.now() < until) {
@@ -562,7 +575,7 @@ final class JavaScriptToolRuntime {
         for (;;) {
           var digest = null;
           for (var i = 0; i < candidates.length; i++) {
-            var res = JSON.parse(this.call('query', Object.assign({ app: a.app, probe: true }, candidates[i])).text);
+            var res = JSON.parse(this.call('query', Object.assign({ app: a.app, probe: true }, this._criteria(candidates[i]))).text);
             if (res.records.length) { return res.records.map(function (r) { r.which = i; return r; }); }
             if (i === 0) { digest = res.digest; }
           }

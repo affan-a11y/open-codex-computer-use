@@ -7,9 +7,9 @@ elsewhere for that one call. Actions throw an `Error` on a tool failure.
 ## Finding controls
 
 ### `cua.query(criteria) -> Element[]`
-Find controls through AX, with no snapshot or image. `criteria`: `text`
-(case-insensitive substring; a whole-label match with `exact: true`, retried as a
-substring when nothing matches whole — such records carry `match: "contains"`),
+Find controls through AX, with no snapshot or image. `criteria`: `text` (the
+whole label, case-insensitive; retried as a substring when nothing matches whole,
+such records carrying `match: "contains"`; `exact: false` asks for a substring),
 `role` (the `AX` prefix optional), `limit` (default 20), `max_nodes` (default
 1500), `window_id`. Supply text or role. Each element:
 
@@ -45,8 +45,10 @@ Pause the program up to 10 s.
 ## Acting
 
 A control argument is criteria (`{ text, role, exact?, timeout_ms? }`), an element
-from a query, or an index. Criteria are waited for (default 3000 ms) and the first
-match with visible bounds is used; none there throws `no control matching …`.
+from a query, or an index. Criteria are waited for (default 3000 ms); among the
+visible matches the action takes the control it can act on — `click` a button,
+link, row or menu item over a caption, `setValue` a field over its label — unless
+`role` says which; none there throws `no control matching …`.
 
 ### `cua.click({ text? | role? | element_index? | x?, y?, click_method? }) -> string`
 ### `cua.type(text, { key_method? }) -> string` — into the focused element.

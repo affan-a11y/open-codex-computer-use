@@ -376,6 +376,35 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(seen[2].1["element_index"] as? Int, 9)
     }
 
+    func testTextCriteriaNameTheWholeLabelUnlessSaidOtherwise() {
+        var exacts: [Bool?] = []
+        let rt = runtime { tool, args in
+            guard tool == "query" else { return .text("ok") }
+            exacts.append(args["exact"] as? Bool)
+            return .text(#"{"records":[{"index":1,"bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+        }
+        _ = rt.run(code: "cua.query('X', {text: 'To'}); cua.query('X', {text: 'To', exact: false}); cua.waitFor('X', {role: 'AXButton'}); cua.any('X', [{text: 'a'}]); cua.click('X', {text: 'b'});", timeoutMs: 20000)
+        XCTAssertEqual(exacts, [true, false, nil, true, true])
+    }
+
+    func testActionsPreferTheControlOverItsLabel() {
+        var clicked: Int?; var set: Int?
+        let rt = runtime { tool, args in
+            switch tool {
+            case "query":
+                return .text(#"{"records":[{"index":1,"role":"AXStaticText","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":2,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":3,"role":"AXButton","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+            case "click": clicked = args["element_index"] as? Int
+            case "set_value": set = args["element_index"] as? Int
+            default: break
+            }
+            return .text("ok")
+        }
+        let result = rt.run(code: "cua.click('X', {text: 'To'}); cua.setValue('X', {text: 'To'}, 'x');", timeoutMs: 20000)
+        XCTAssertFalse(result.isError, result.primaryText ?? "")
+        XCTAssertEqual(clicked, 3)  // the button, not the caption
+        XCTAssertEqual(set, 2)      // the field, not its label
+    }
+
     func testClickByCriteriaFailsPlainlyWhenNothingMatches() {
         let rt = runtime { tool, _ in
             tool == "query" ? .text(#"{"records":[],"digest":"same"}"#) : .text("ok")
