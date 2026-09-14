@@ -42,6 +42,21 @@ final class JavaScriptToolRuntime {
         var finished = false
         var failed = false
         var error: String?
+        /// The `try` blocks the stream is currently inside, outermost first.
+        var frames: [TryFrame] = []
+    }
+
+    /// One open `try`, held while its body streams: the body's statements run
+    /// before the catch is written, so a throw waits here for the handler that
+    /// has not arrived yet.
+    private final class TryFrame {
+        /// UTF-16 offset where the `try` statement begins.
+        let start: Int
+        init(start: Int) { self.start = start }
+        var error: JSValue?
+        /// False while a section is skipped: the rest of a thrown-in body, or a
+        /// catch with nothing to catch.
+        var active = true
     }
 
     init(
@@ -179,9 +194,9 @@ final class JavaScriptToolRuntime {
         let source = cell.source
         let base = cell.executed
         let remainder = String(source[String.Index(utf16Offset: base, in: source)...])
-        let scan = StreamStatementParser.shared.scan(remainder, isFinal: isFinal)
-        for end in scan.ends where !cell.failed {
-            evaluateStreamStatement(cell, through: base + end)
+        let scan = StreamStatementParser.shared.scan(remainder, isFinal: isFinal, open: cell.frames.count)
+        for op in scan.ops where !cell.failed {
+            apply(op, to: cell, through: base + op.end)
         }
         let total = source.utf16.count
         if isFinal, !cell.failed, cell.executed < total, !scan.restIsBlank {
@@ -189,17 +204,84 @@ final class JavaScriptToolRuntime {
         }
     }
 
-    private func evaluateStreamStatement(_ cell: StreamCell, through end: Int) {
+    /// One piece of the stream. A statement runs only where no enclosing section
+    /// is being skipped; the try's own edges keep its semantics without it.
+    private func apply(_ op: StreamStatementParser.Op, to cell: StreamCell, through end: Int) {
+        switch op.kind {
+        case .run:
+            if cell.frames.allSatisfy({ $0.active }) {
+                evaluateStreamStatement(cell, through: end)
+            } else {
+                cell.executed = end
+            }
+        case .openTry:
+            cell.frames.append(TryFrame(start: cell.executed))
+            cell.executed = end
+        case .startCatch:
+            cell.executed = end
+            guard let frame = cell.frames.last else { return }
+            guard let error = frame.error else {
+                frame.active = false  // nothing was thrown: the handler is skipped
+                return
+            }
+            frame.error = nil
+            frame.active = true
+            // The binding is a global: each statement is evaluated on its own, so a
+            // block-scoped `catch (error)` would not reach the next one.
+            if !op.name.isEmpty {
+                context.setObject(error, forKeyedSubscript: op.name as NSString)
+            }
+        case .startFinally:
+            cell.executed = end
+            cell.frames.last?.active = true
+        case .close:
+            cell.executed = end
+            guard let frame = cell.frames.popLast() else { return }
+            if let error = frame.error {
+                raise(error, in: cell)
+            } else if cell.frames.allSatisfy({ $0.active }) {
+                completed(cell, from: frame.start, through: end)
+            }
+        }
+    }
+
+    /// A thrown value the innermost open `try` will handle; with none, the cell fails.
+    private func raise(_ error: JSValue, in cell: StreamCell) {
+        guard let frame = cell.frames.last else {
+            cell.failed = true
+            cell.error = error.toString() ?? "JavaScript error"
+            return
+        }
+        frame.error = error
+        frame.active = false
+    }
+
+    /// A `try` statement that ran to its end counts as one completed statement, so
+    /// the host sees the whole block run, not only the pieces inside it.
+    private func completed(_ cell: StreamCell, from start: Int, through end: Int) {
+        let event = statementEvent(cell, from: start, through: end)
+        streamObserver?(event.merging(["type": "started"]) { _, new in new })
+        cell.completed += 1
+        streamObserver?(event.merging(["type": "done"]) { _, new in new })
+    }
+
+    /// A statement's identity on the wire: its text and its byte range in the source.
+    private func statementEvent(_ cell: StreamCell, from start: Int, through end: Int) -> [String: Any] {
         let source = cell.source
-        let startIndex = String.Index(utf16Offset: cell.executed, in: source)
+        let startIndex = String.Index(utf16Offset: start, in: source)
         let endIndex = String.Index(utf16Offset: end, in: source)
-        let statement = String(source[startIndex..<endIndex])
-        cell.executed = end
-        let event: [String: Any] = [
-            "cell": cell.id, "index": cell.completed, "text": statement,
+        return [
+            "cell": cell.id, "index": cell.completed, "text": String(source[startIndex..<endIndex]),
             "start": source.utf8.distance(from: source.startIndex, to: startIndex),
             "end": source.utf8.distance(from: source.startIndex, to: endIndex),
         ]
+    }
+
+    private func evaluateStreamStatement(_ cell: StreamCell, through end: Int) {
+        let source = cell.source
+        let statement = String(source[String.Index(utf16Offset: cell.executed, in: source)..<String.Index(utf16Offset: end, in: source)])
+        let event = statementEvent(cell, from: cell.executed, through: end)
+        cell.executed = end
         streamObserver?(event.merging(["type": "started"]) { _, new in new })
         let contextRef = UnsafeMutableRawPointer(context.jsGlobalContextRef)
         ocu_js_set_time_limit(contextRef, 30.0)
@@ -207,8 +289,7 @@ final class JavaScriptToolRuntime {
         context.evaluateScript(statement)
         ocu_js_clear_time_limit(contextRef)
         if let exception = context.exception {
-            cell.failed = true
-            cell.error = exception.toString() ?? "JavaScript error"
+            raise(exception, in: cell)
             return
         }
         cell.completed += 1

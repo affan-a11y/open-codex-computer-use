@@ -66,10 +66,12 @@ final class PiBridgeServerTests: XCTestCase {
         XCTAssertEqual(read.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
     }
 
-    func testIfAndTryBodiesWaitForTheirContinuation() throws {
-        for (head, tail) in [
-            ("if (true) { globalThis.ran += 1; }\n// branch follows\n", "else { globalThis.ran += 10; };\n"),
-            ("try { globalThis.ran += 1; }\n", "catch (e) { globalThis.ran += 10; };\n"),
+    /// An `if` body waits for a possible `else`; a `try` body runs as it streams and
+    /// its `catch` is skipped when nothing threw. Either way the result is the same.
+    func testIfWaitsForItsElseAndATryBodyRunsEarly() throws {
+        for (head, tail, early) in [
+            ("if (true) { globalThis.ran += 1; }\n// branch follows\n", "else { globalThis.ran += 10; };\n", 1),
+            ("try { globalThis.ran += 1; }\n", "catch (e) { globalThis.ran += 10; };\n", 2),
         ] {
             let bridge = OpenComputerUsePiBridgeServer()
             func feed(_ source: String, final: Bool) throws -> [[String: Any]] {
@@ -79,8 +81,8 @@ final class PiBridgeServerTests: XCTestCase {
                 return bridge.handle(line: String(decoding: data, as: UTF8.self)).map(decode)
             }
             let prefix = "globalThis.ran = 0;\n" + head
-            let early = try feed(prefix, final: false)
-            XCTAssertEqual(early.filter { $0["type"] as? String == "done" }.count, 1)
+            let opened = try feed(prefix, final: false)
+            XCTAssertEqual(opened.filter { $0["type"] as? String == "done" }.count, early)
             let final = try feed(prefix + tail + "write(globalThis.ran);", final: true)
             XCTAssertEqual(final.first { $0["type"] as? String == "output" }?["text"] as? String, "1")
             XCTAssertEqual(final.last?["status"] as? String, "done")

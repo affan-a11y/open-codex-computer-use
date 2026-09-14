@@ -165,3 +165,13 @@ fully arrived (`el` may still become `else`). A `;`-terminated statement or a
 closed block runs at once. A complete statement followed by a broken literal
 still runs. On the final feed everything complete runs, then any leftover
 source is executed as-is so JavaScriptCore reports its syntax error.
+
+The scan steps into an open `try`, because a program written as one `try` per
+step would otherwise wait for its fallback routes to finish generating before
+its first action ran. The body's statements run as they arrive; a throw is held
+until the `catch` is written, and the statements after it in that body are
+skipped; the handler then runs with the error bound to its name (a global, since
+each statement is evaluated on its own). The `try` itself reports one `started`
+and `done` pair over its whole range when it closes, so a reader counting how
+far the source has run sees the block, not only the pieces inside it. `if`, `for`
+and `while` bodies are not entered: their statements run when the block closes.

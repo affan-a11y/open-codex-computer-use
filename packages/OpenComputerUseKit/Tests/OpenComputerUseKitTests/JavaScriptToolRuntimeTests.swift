@@ -248,6 +248,85 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(typed, 1)
     }
 
+    func testStreamRunsInsideAnOpenTryBeforeItsCatch() {
+        var typed: [String] = []
+        let rt = runtime { tool, args in
+            if tool == "type_text" { typed.append(args["text"] as? String ?? "") }
+            return .text("ok")
+        }
+        rt.beginStream(id: "c1")
+        // the part's first action runs while its fallback route is still being written
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "try {\n  cua.type(\"X\", \"a\");\n").completed, 1)
+        XCTAssertEqual(typed, ["a"])
+        XCTAssertEqual(rt.feedStream(id: "c1", source: "try {\n  cua.type(\"X\", \"a\");\n  cua.type(\"X\", \"b\");\n").completed, 2)
+        let result = rt.finishStream(id: "c1", source: "try {\n  cua.type(\"X\", \"a\");\n  cua.type(\"X\", \"b\");\n} catch (e) {\n  write(\"caught\");\n};\n")
+        XCTAssertEqual(typed, ["a", "b"])
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.primaryText, "(no output)")  // the catch was skipped
+    }
+
+    func testStreamTryBodyErrorWaitsForTheCatchThatArrivesLater() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let thrown = "try {\n  globalThis.ran = 1;\n  throw new Error(\"boom\");\n  globalThis.ran = 2;\n"
+        XCTAssertFalse(rt.feedStream(id: "c1", source: thrown).failed)
+        let result = rt.finishStream(id: "c1", source: thrown + "} catch (err) {\n  write(err.message + globalThis.ran);\n};\n")
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.primaryText, "boom1")  // the statement after the throw was skipped
+    }
+
+    func testStreamNestedFallbackApproachRunsFromTheCatch() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = """
+        try {
+          throw new Error("first");
+        } catch (error) {
+          try {
+            write("second:" + error.message);
+          } catch (fallbackError) {
+            throw new Error("both failed");
+          }
+        };
+        """
+        XCTAssertEqual(rt.finishStream(id: "c1", source: source).primaryText, "second:first")
+    }
+
+    func testStreamUnhandledErrorFailsTheCellWhenTheTryCloses() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = "try {\n  throw new Error(\"boom\");\n} catch (e) {\n  throw new Error(\"still \" + e.message);\n};\n"
+        let result = rt.finishStream(id: "c1", source: source)
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.primaryText?.contains("still boom") == true)
+    }
+
+    func testStreamFinallyRunsWhateverHappened() {
+        let rt = runtime()
+        rt.beginStream(id: "c1")
+        let source = "try {\n  write(\"a\");\n} finally {\n  write(\"b\");\n};\n"
+        XCTAssertEqual(rt.finishStream(id: "c1", source: source).primaryText, "ab")
+    }
+
+    func testStreamClosedTryCountsAsOneCompletedStatement() {
+        var ranges: [(Int, Int)] = []
+        let rt = runtime()
+        rt.streamObserver = { event in
+            if event["type"] as? String == "done",
+                let start = event["start"] as? Int, let end = event["end"] as? Int {
+                ranges.append((start, end))
+            }
+        }
+        rt.beginStream(id: "c1")
+        let source = "try {\n  write(\"a\");\n} catch (e) {\n  write(\"b\");\n};\n"
+        rt.feedStream(id: "c1", source: "try {\n  write(\"a\");\n")
+        _ = rt.finishStream(id: "c1", source: source)
+        // the inner statement, then the whole try through its `;`, which is how far
+        // the host counts a part as run (the trailing newline is not part of it)
+        XCTAssertEqual(ranges.count, 2)
+        XCTAssertEqual(ranges.last?.1, source.utf8.count - 1)
+    }
+
     func testStreamSemicolonClosesCompoundStatementPromptly() {
         let rt = runtime()
         rt.beginStream(id: "c1")
