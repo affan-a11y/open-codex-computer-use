@@ -1780,6 +1780,29 @@ final class OpenComputerUseKitTests: XCTestCase {
         }
     }
 
+    func testRestorePreparedWindowRejectsMissingAndUnparkedIDs() {
+        let dispatcher = ComputerUseToolDispatcher()
+        XCTAssertThrowsError(try dispatcher.callTool(name: "restore_prepared_window", arguments: [:])) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, #"invalidArguments("restore_prepared_window requires window_id")"#)
+        }
+        XCTAssertThrowsError(try dispatcher.callTool(name: "restore_prepared_window", arguments: ["window_id": 4_000_000_000])) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "window 4000000000 is not parked on the agent display")
+        }
+        XCTAssertNil(AgentDisplay.shared.displayBounds, "a rejected restore never creates the display")
+    }
+
+    func testAgentAppCatalogCarriesPIDsForRunningAppsOnly() throws {
+        let text = try XCTUnwrap(AgentPreparation.catalog().content.first?.dictionary["text"] as? String)
+        let catalog = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        let apps = try XCTUnwrap(catalog["apps"] as? [[String: Any]])
+        XCTAssertFalse(apps.isEmpty)
+        for app in apps {
+            let pid = app["pid"] as? Int
+            XCTAssertEqual(pid != nil, app["running"] as? Bool, "\(app["app"] ?? "")")
+            if let pid { XCTAssertGreaterThan(pid, 0) }
+        }
+    }
+
     func testKeyMethodParsingAndPolicy() throws {
         XCTAssertEqual(try parseKeyMethod(nil), .auto)
         XCTAssertEqual(try parseKeyMethod(" SKY_KEY "), .skyKey)

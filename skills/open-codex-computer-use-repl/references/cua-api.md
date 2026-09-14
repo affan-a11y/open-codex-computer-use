@@ -36,7 +36,7 @@ control across later snapshots. Re-query when that control no longer exists.
 
 ### `cua.waitFor(app, criteria, { timeout_ms?, interval_ms? }) -> Element[]`
 `cua.query`, repeated until it matches or `timeout_ms` (default 5000, at most
-25000) passes; returns `[]` on timeout instead of throwing. Use it after a key
+25000; 0 queries once) passes; returns `[]` on timeout instead of throwing. Use it after a key
 press or click that changes the screen, before the next query.
 
 ### `cua.sleep(ms)`
@@ -88,6 +88,17 @@ Running and recently used apps.
 ### `cua.call(tool, args) -> { text, images }`
 Low-level escape hatch that calls any underlying action by name. Returns text and
 any base64 images. Refuses `js` (no re-entry).
+
+### `cua.call("restore_prepared_window", { window_id }) -> string`
+Puts a window `prepare_app` parked back where the user had it while the app
+keeps running. A window `prepare_app` opened (Dock reopen or `new_window`) is
+the agent's and is closed instead; one that appeared because the app was
+launched is moved home and left to the app. The window stops being the app's
+default target. `close_prepared_window` takes the same argument and closes any
+parked window. Either call answers `closed <id>` when the window is gone, also
+when the app had already taken it down; a window a sheet holds open survives
+either call and is reported `still open`, back on the user's screen. Both error
+when the window is not parked.
 
 ### `cua.call("run_intent", { bundle_id, action_id, parameters?, input? }) -> string`
 Runs an App Intent by identity and returns its result to the next statement.

@@ -16,6 +16,8 @@ struct ListedAppDescriptor {
     let isFrontmost: Bool
     let lastUsed: Date?
     let uses: Int?
+    /// Set while the app runs, so callers can match windows by `kCGWindowOwnerPID` rather than name.
+    var pid: pid_t? = nil
 
     var renderedLine: String {
         var markers: [String] = []
@@ -94,7 +96,8 @@ enum AppDiscovery {
                 isRunning: runningDescriptor != nil,
                 isFrontmost: key == frontmostBundleIdentifier,
                 lastUsed: record.lastUsed,
-                uses: record.uses
+                uses: record.uses,
+                pid: runningDescriptor?.pid
             )
         }
 
@@ -111,7 +114,8 @@ enum AppDiscovery {
                 isRunning: true,
                 isFrontmost: key == frontmostBundleIdentifier,
                 lastUsed: existing?.lastUsed,
-                uses: existing?.uses
+                uses: existing?.uses,
+                pid: descriptor.pid
             )
         }
 

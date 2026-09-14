@@ -122,14 +122,23 @@ be called through the CLI in a separate process.
 | Call | Arguments | Result |
 | --- | --- | --- |
 | `prepare_agent_display` | `{}` | JSON text with display ID and dimensions; creates the display before apps are selected |
-| `agent_app_catalog` | `{}` | JSON text with known apps and the default browser's bundle ID |
+| `agent_app_catalog` | `{}` | JSON text with known apps (`name`, `app`, `running`, `pid` when running, else null) and the default browser's bundle ID |
 | `prepare_app` | `{app, new_window?: boolean}` | JSON text with app, name and window_id; launches in the background if necessary and parks the window |
 | `observe_app` | `{app, window_id}` | The named window's AX tree and image; does not launch, activate, or substitute another window |
+| `close_prepared_window` | `{window_id}` | Closes a parked window with its own close button and forgets it: `closed <id>` (also when the window was already gone), or `window <id> is still open` when a sheet holds it (it is then back on the user's screen, no longer parked). Errors when the window is not parked |
+| `restore_prepared_window` | `{window_id}` | Puts a parked window back while the app keeps running, exactly as process exit would: a window `prepare_app` opened is closed (`closed <id>`, also when it was already gone), any other goes home (`restored <id>`, or `still open` as above); the window is no longer the app's default target. Errors when the window is not parked |
 
 Keep the process that prepared the display alive for the run. Closing its
-`pi-bridge` input restores parked windows. `new_window` sends Command-N to the
-prepared app and waits for a different window; use it for a new browser window.
-If no new window appears, it fails without repeating the command.
+`pi-bridge` input restores parked windows. `new_window` presses the prepared
+app's New Window menu item and waits for a different window; use it for a new
+browser window. An app without that item (Command-N makes a note or an event
+there) fails with `<app> has no New Window menu item` and nothing is pressed;
+if no new window appears, it fails without repeating the command.
+
+A window `prepare_app` opened, by Dock reopen or `new_window`, is the agent's:
+restoring it closes it, since the user never had it. A window the user already
+had, or one that appeared because the app was launched, is moved home and left
+to the app (a host that launched the app for the run quits it).
 
 Prepared windows remain the default target for that runtime's queries and
 input. Observation processes keep separate snapshot indexes; their indexes are

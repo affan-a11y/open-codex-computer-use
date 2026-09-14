@@ -488,6 +488,14 @@ public final class ComputerUseService {
         }
     }
 
+    /// Forget a prepared window that was closed, so later calls resolve the app's window afresh.
+    func unbindPreparedWindow(_ windowID: CGWindowID) {
+        for (key, id) in preparedWindows where id == windowID {
+            preparedWindows[key] = nil
+            snapshotsByApp[key] = nil
+        }
+    }
+
     public func getAppState(
         app query: String,
         textLimit: SnapshotTextLimit = .defaults,
@@ -511,7 +519,11 @@ public final class ComputerUseService {
         case .agentDisplay:
             try AgentDisplay.shared.park(windowID: windowID, pid: snapshot.app.pid, window: windowElement)
         case .restore:
-            try AgentDisplay.shared.restore(windowID: windowID)
+            // A window that was never parked stays put; the read below still answers, resolving the window afresh.
+            if AgentDisplay.shared.isParked(windowID: windowID) {
+                try AgentDisplay.shared.restore(windowID: windowID)
+                unbindPreparedWindow(windowID)
+            }
         case .keep:
             break
         }

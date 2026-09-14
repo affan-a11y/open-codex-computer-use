@@ -97,8 +97,12 @@ public final class ComputerUseToolDispatcher {
             guard let id = optionalDouble("window_id", in: arguments), id > 0 else {
                 throw ComputerUseError.invalidArguments("close_prepared_window requires window_id")
             }
-            try AgentDisplay.shared.close(windowID: CGWindowID(id))
-            return ToolCallResult(content: [.text("closed \(Int(id))")])
+            return try restorePreparedWindow(CGWindowID(id), close: true)
+        case "restore_prepared_window":
+            guard let id = optionalDouble("window_id", in: arguments), id > 0 else {
+                throw ComputerUseError.invalidArguments("restore_prepared_window requires window_id")
+            }
+            return try restorePreparedWindow(CGWindowID(id), close: false)
         case "run_intent":
             return try AppIntentExecution.run(
                 bundleID: requireString("bundle_id", in: arguments),
@@ -376,6 +380,16 @@ public final class ComputerUseToolDispatcher {
         }
 
         return value
+    }
+
+    private func restorePreparedWindow(_ id: CGWindowID, close: Bool) throws -> ToolCallResult {
+        let outcome = try AgentDisplay.shared.restore(windowID: id, close: close)
+        service.unbindPreparedWindow(id)
+        switch outcome {
+        case .home: return .text("restored \(id)")
+        case .closed: return .text("closed \(id)")
+        case .heldOpen: return .text("window \(id) is still open (a sheet holds it); it is back on the user's screen, no longer parked")
+        }
     }
 
     private func optionalDouble(_ key: String, in arguments: [String: Any]) -> Double? {

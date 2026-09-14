@@ -395,16 +395,19 @@ final class JavaScriptToolRuntime {
         return JSON.parse(this.call('query', Object.assign({ app: app }, criteria || {})).text);
       },
       sleep: function (ms) { __ocuSleep(Number(ms) || 0); },
-      // query, repeated until it matches or timeout_ms (default 5000) passes; [] on timeout.
+      // query, repeated until it matches or timeout_ms (default 5000, 0 queries once) passes; [] on timeout.
+      // No query starts past the deadline: one more could reach the statement's 30 s limit.
       waitFor: function (app, criteria, opts) {
-        var timeout = Math.min((opts && opts.timeout_ms) || 5000, 25000);
+        var timeout = Math.min(opts && opts.timeout_ms != null ? Number(opts.timeout_ms) : 5000, 25000);
         var every = (opts && opts.interval_ms) || 250;
         var until = Date.now() + timeout;
-        for (;;) {
-          var found = this.query(app, criteria);
-          if (found.length || Date.now() >= until) { return found; }
-          __ocuSleep(Math.min(every, Math.max(0, until - Date.now())));
+        var found = this.query(app, criteria);
+        while (!found.length && Date.now() < until) {
+          __ocuSleep(Math.min(every, until - Date.now()));
+          if (Date.now() >= until) { return []; }
+          found = this.query(app, criteria);
         }
+        return found;
       }
     };
     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };

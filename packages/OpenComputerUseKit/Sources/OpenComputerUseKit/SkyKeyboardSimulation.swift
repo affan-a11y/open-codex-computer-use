@@ -219,45 +219,66 @@ enum SkyKeyboardDispatcher {
 
     // MARK: - Menu-bar key equivalents
 
-    /// Press the menu item a `cmd` chord names, with no window to address: an app whose
-    /// windows are all on another Space still has a menu bar.
-    static func pressMenuItem(key: String, pid: pid_t) throws {
-        guard let equivalent = skyMenuKeyEquivalent(for: try KeyPressParser.parse(key)),
-              let item = menuItem(matching: equivalent, pid: pid) else {
-            throw ComputerUseError.message("no enabled menu item for '\(key)'")
+    /// Press the app's New Window menu item, with no window to address: an app whose windows are
+    /// all on another Space still has a menu bar. Cmd-N alone would not do: in Notes, Reminders,
+    /// Music and Calendar it makes a new note, reminder, playlist or event in the user's window.
+    static func pressNewWindow(pid: pid_t, appName: String) throws {
+        let cmdN = SkyMenuKeyEquivalent(character: "N", modifiers: 0)
+        let item = menuItem(pid: pid) { item in
+            // A leaf only: a submenu header called "New Window" (Terminal's profiles) would just drop open.
+            guard (copyValue(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).isEmpty, isEnabled(item),
+                  let title = copyValue(item, kAXTitleAttribute) as? String else { return false }
+            // The title is the only sign that the item makes a window and not a note or an event
+            // (Notes, Calendar and Music put those on Cmd-N), so this is English only; elsewhere
+            // it throws and the caller falls back to the app's existing window.
+            // "New Finder Window": the Cmd-N item counts when it names a window.
+            return title.hasPrefix("New Window") || (title.contains("Window") && hasKeyEquivalent(item, cmdN))
+        }
+        guard let item else {
+            throw ComputerUseError.message("\(appName) has no New Window menu item")
         }
         let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
         guard result == .success else {
-            throw ComputerUseError.message("could not press the menu item for '\(key)' (AXError \(result.rawValue))")
+            throw ComputerUseError.message("could not press New Window in \(appName) (AXError \(result.rawValue))")
         }
     }
 
     private static func menuItem(matching equivalent: SkyMenuKeyEquivalent, pid: pid_t) -> AXUIElement? {
+        menuItem(pid: pid) { isEnabled($0) && hasKeyEquivalent($0, equivalent) }
+    }
+
+    private static func isEnabled(_ item: AXUIElement) -> Bool {
+        (copyValue(item, kAXEnabledAttribute) as? NSNumber)?.boolValue != false
+    }
+
+    private static func hasKeyEquivalent(_ item: AXUIElement, _ equivalent: SkyMenuKeyEquivalent) -> Bool {
+        skyMenuItemMatches(
+            cmdChar: copyValue(item, "AXMenuItemCmdChar") as? String,
+            cmdModifiers: (copyValue(item, "AXMenuItemCmdModifiers") as? NSNumber)?.intValue,
+            enabled: nil,
+            equivalent: equivalent
+        )
+    }
+
+    private static func menuItem(pid: pid_t, where matches: (AXUIElement) -> Bool) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
         guard let menuBar = copyValue(application, kAXMenuBarAttribute) else {
             return nil
         }
-        return firstMenuItem(in: menuBar as! AXUIElement, matching: equivalent, depth: 0)
+        return firstMenuItem(in: menuBar as! AXUIElement, depth: 0, where: matches)
     }
 
-    private static func firstMenuItem(in element: AXUIElement, matching equivalent: SkyMenuKeyEquivalent, depth: Int) -> AXUIElement? {
+    private static func firstMenuItem(in element: AXUIElement, depth: Int, where matches: (AXUIElement) -> Bool) -> AXUIElement? {
         guard depth < 6 else {
             return nil
         }
 
         for child in copyValue(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
-            let role = copyValue(child, kAXRoleAttribute) as? String
-            if role == kAXMenuItemRole as String,
-               skyMenuItemMatches(
-                   cmdChar: copyValue(child, "AXMenuItemCmdChar") as? String,
-                   cmdModifiers: (copyValue(child, "AXMenuItemCmdModifiers") as? NSNumber)?.intValue,
-                   enabled: (copyValue(child, kAXEnabledAttribute) as? NSNumber)?.boolValue,
-                   equivalent: equivalent
-               ) {
+            if copyValue(child, kAXRoleAttribute) as? String == kAXMenuItemRole as String, matches(child) {
                 return child
             }
 
-            if let nested = firstMenuItem(in: child, matching: equivalent, depth: depth + 1) {
+            if let nested = firstMenuItem(in: child, depth: depth + 1, where: matches) {
                 return nested
             }
         }

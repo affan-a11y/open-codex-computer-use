@@ -20,6 +20,11 @@ enum TimingLog {
         fputs(String(format: "[open-computer-use] timing %@ %.1fms\n", label, (now() - start) * 1000), stderr)
     }
 
+    static func note(_ message: String) {
+        guard enabled else { return }
+        fputs("[open-computer-use] \(message)\n", stderr)
+    }
+
     static func measure<T>(_ label: String, _ body: () throws -> T) rethrows -> T {
         let start = now()
         defer { log(label, since: start) }

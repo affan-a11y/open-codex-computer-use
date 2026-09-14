@@ -263,9 +263,11 @@ final class SkyLightSPI: @unchecked Sendable {
     }
 
     /// Make `psn` the front process again, as a user-generated switch, if it no longer is.
-    func restoreFrontProcess(_ psn: [UInt8]) {
-        guard let setFrontProcessFunction, let current = frontProcess(), current != psn else { return }
-        _ = psn.withUnsafeBytes { setFrontProcessFunction($0.baseAddress, 0, Self.userGeneratedSwitch) }
+    /// False when WindowServer refused the switch.
+    @discardableResult
+    func restoreFrontProcess(_ psn: [UInt8]) -> Bool {
+        guard let setFrontProcessFunction, let current = frontProcess(), current != psn else { return true }
+        return psn.withUnsafeBytes { setFrontProcessFunction($0.baseAddress, 0, Self.userGeneratedSwitch) } == 0
     }
 
     /// CGWindowID behind an AX window element.

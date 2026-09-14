@@ -52,9 +52,8 @@ final class AgentDisplay: @unchecked Sendable {
     // logged with OPEN_COMPUTER_USE_DEBUG_TIMING=1.
     static let displaySettle: TimeInterval = 3.0
     static let moveSettle: TimeInterval = 2.0
-    // Fallback sleeps when the observation SPIs are unavailable.
+    // Fallback sleep for display creation when the Space SPI is unavailable.
     static let displayFallbackSettle: TimeInterval = 0.5
-    static let moveFallbackSettle: TimeInterval = 1.0
 
     struct ParkedWindow {
         let pid: pid_t
@@ -67,7 +66,7 @@ final class AgentDisplay: @unchecked Sendable {
     private(set) var displayID: CGDirectDisplayID = 0
     private(set) var displaySpaceIDs: Set<UInt64> = []
     private var parked: [CGWindowID: ParkedWindow] = [:]
-    /// Windows that were closed before the agent reopened them; restoring closes them again.
+    /// Windows the agent opened; restoring closes them again.
     private var reopened: Set<CGWindowID> = []
     private var exitHookInstalled = false
 
@@ -129,7 +128,7 @@ final class AgentDisplay: @unchecked Sendable {
     /// display's Spaces. Space membership alone precedes the frame update.
     private func waitForWindow(_ windowID: CGWindowID, toLandOn spaceIDs: Set<UInt64>, or bounds: CGRect) {
         let spi = SkyLightSPI.shared
-        let landed = waitUntil(timeout: Self.moveSettle) {
+        waitUntil(timeout: Self.moveSettle) {
             guard let frame = Self.windowFrame(windowID),
                   bounds.contains(CGPoint(x: frame.minX + 1, y: frame.minY + 1))
             else { return false }
@@ -137,9 +136,6 @@ final class AgentDisplay: @unchecked Sendable {
                 return spaces.contains(where: spaceIDs.contains)
             }
             return true
-        }
-        if landed == nil {
-            Thread.sleep(forTimeInterval: Self.moveFallbackSettle)
         }
     }
 
@@ -184,71 +180,76 @@ final class AgentDisplay: @unchecked Sendable {
         return nil
     }
 
-    /// Close a window parked here with its own close button, so no other window of the app
-    /// is touched (a menu's Close Window acts on whichever window is main).
-    func close(windowID: CGWindowID) throws {
+    enum Restored { case home, closed, heldOpen }
+
+    /// Put a parked window back where the user had it. A window the agent opened
+    /// (`closeWhenRestored`), or any window when `close` is set, is closed with its own close
+    /// button instead, so no other window of the app is touched (a menu's Close Window acts on
+    /// whichever window is main). One that survives the press (a Save sheet holds it) goes home,
+    /// no longer parked; one the app already took down counts as closed.
+    @discardableResult
+    func restore(windowID: CGWindowID, close: Bool = false) throws -> Restored {
         lock.lock()
         defer { lock.unlock() }
-        guard let entry = parked[windowID] else {
-            throw ComputerUseError.stateUnavailable("window \(windowID) is not parked on the agent display")
+        let outcome = try restoreLocked(windowID, close: close)
+        destroyDisplayIfIdle()
+        return outcome
+    }
+
+    func restoreAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        for windowID in Array(parked.keys) {
+            try? restoreLocked(windowID)
         }
-        var button: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(entry.element, kAXCloseButtonAttribute as CFString, &button) == .success,
-              let button, AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success else {
-            throw ComputerUseError.stateUnavailable("window \(windowID) has no close button to press")
-        }
-        parked[windowID] = nil
         destroyDisplayIfIdle()
     }
 
-    /// Close a window again when it is restored: the user had it closed before the agent reopened it.
+    /// Close a window again when it is restored: the agent opened it, the user never had it.
     func closeWhenRestored(_ windowID: CGWindowID) {
         lock.lock()
         defer { lock.unlock() }
         reopened.insert(windowID)
     }
 
-    /// Press a window's close button, as the user had it closed.
-    private func close(_ windowID: CGWindowID, _ element: AXUIElement) {
-        guard reopened.remove(windowID) != nil else { return }
-        var button: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &button) == .success, let button {
-            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
-        }
-    }
-
-    func restore(windowID: CGWindowID) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let entry = parked.removeValue(forKey: windowID) else {
-            return
+    /// The per-window step of `restore` and `restoreAll` (call with lock held). The window stays
+    /// parked when the move fails, so the caller can retry or close it.
+    private func restoreLocked(_ windowID: CGWindowID, close: Bool = false) throws -> Restored {
+        guard let entry = parked[windowID] else {
+            throw ComputerUseError.stateUnavailable("window \(windowID) is not parked on the agent display")
         }
         let start = TimingLog.now()
-        try setAXPosition(entry.element, entry.originalPosition)
-        close(windowID, entry.element)
-        let back = waitUntil(timeout: Self.moveSettle) {
-            guard let frame = Self.windowFrame(windowID) else { return false }
-            return abs(frame.minX - entry.originalPosition.x) < 1 && abs(frame.minY - entry.originalPosition.y) < 1
+        var outcome = Restored.home
+        if Self.windowFrame(windowID) == nil {
+            TimingLog.note("agent_display.restore: window \(windowID) was already gone")
+            outcome = .closed
+        } else if close || reopened.remove(windowID) != nil {
+            // The mark goes with the press: should the move below fail, a retry only moves, never presses twice.
+            guard pressClose(entry.element) else {
+                throw ComputerUseError.stateUnavailable("window \(windowID) has no close button to press")
+            }
+            outcome = waitUntil(timeout: Self.moveSettle) { Self.onScreenWindows()[windowID] == nil } != nil ? .closed : .heldOpen
         }
-        if back == nil {
-            Thread.sleep(forTimeInterval: Self.moveFallbackSettle)
+        if outcome != .closed {
+            try setAXPosition(entry.element, entry.originalPosition)
+            waitUntil(timeout: Self.moveSettle) {
+                guard let frame = Self.windowFrame(windowID) else { return false }
+                return abs(frame.minX - entry.originalPosition.x) < 1 && abs(frame.minY - entry.originalPosition.y) < 1
+            }
         }
+        parked[windowID] = nil
+        reopened.remove(windowID)
         TimingLog.log("agent_display.restore", since: start)
-        destroyDisplayIfIdle()
+        return outcome
     }
 
-    func restoreAll() {
-        lock.lock()
-        defer { lock.unlock() }
-        for (windowID, entry) in parked {
-            try? setAXPosition(entry.element, entry.originalPosition)
-            close(windowID, entry.element)
+    /// Press a window's close button. False when it has none or the press was refused.
+    private func pressClose(_ element: AXUIElement) -> Bool {
+        var button: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &button) == .success, let button else {
+            return false
         }
-        if !parked.isEmpty {
-            Thread.sleep(forTimeInterval: Self.moveFallbackSettle)
-        }
-        parked.removeAll()
-        destroyDisplayIfIdle()
+        return AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success
     }
 
     // MARK: - Display lifecycle (call with lock held)
@@ -296,7 +297,9 @@ final class AgentDisplay: @unchecked Sendable {
         // A new display hands activation to the last regular app. When the user is typing in an
         // accessory app (a menu-bar composer), that moves their keystrokes into the app behind.
         // The agent display must not move the user's focus: give it back.
-        if let frontBefore { spi.restoreFrontProcess(frontBefore) }
+        if let frontBefore, !spi.restoreFrontProcess(frontBefore) {
+            TimingLog.note("agent_display.ready could not restore the front process")
+        }
         returnRestoredWindows(windowsBefore, from: displayBounds ?? .zero)
         TimingLog.log("agent_display.ready", since: start)
         return displayBounds ?? .zero
@@ -308,13 +311,29 @@ final class AgentDisplay: @unchecked Sendable {
         }
     }
 
+    /// Removing a display hands activation around like adding one did (see `ensureDisplay`), after
+    /// WindowServer has processed the removal: give the front process back on every poll tick.
     private func destroyDisplay() {
-        if let handle {
-            ocu_virtual_display_destroy(handle)
-        }
-        handle = nil
+        guard let handle else { return }
+        let spi = SkyLightSPI.shared
+        let frontBefore = spi.frontProcess()
+        let id = displayID
+        let start = TimingLog.now()
+        ocu_virtual_display_destroy(handle)
+        self.handle = nil
         displayID = 0
         displaySpaceIDs = []
+        let gone = waitUntil(timeout: Self.displaySettle) {
+            if let frontBefore { spi.restoreFrontProcess(frontBefore) }
+            return CGDisplayBounds(id).isEmpty
+        }
+        if gone == nil {
+            TimingLog.note("agent_display.destroy timed out waiting for the display to go")
+        }
+        if let frontBefore, !spi.restoreFrontProcess(frontBefore) {
+            TimingLog.note("agent_display.destroy could not restore the front process")
+        }
+        TimingLog.log("agent_display.destroy", since: start)
     }
 
     private func installExitHookIfNeeded() {
