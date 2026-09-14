@@ -54,8 +54,8 @@ when the action has run. Print with `write(value)`; return values are not shown.
 ## Output, persistence, timeouts
 
 - `write(value)` appends to the result (objects are JSON-stringified);
-  `console.log(...)` adds a newline. `emitImage(base64)` attaches an image;
-  `cua.screenshot(app)` emits the window screenshot and returns the tree text.
+  `console.log(...)` adds a newline. `cua.screenshot(app)` shows the window's
+  picture to the model and returns the tree text.
 - Each `js` call runs in its own scope, so `let`/`const` never collide across
   calls. Assign to `globalThis` to keep a value for the next call. Pass
   `reset: true` in the tool arguments to clear all `globalThis` bindings first.
@@ -94,7 +94,7 @@ cua.drag(app, from_x, from_y, to_x, to_y)
 cua.setValue(app, element_index, value)
 cua.secondaryAction(app, element_index, action)
 cua.listApps()
-cua.call(tool, args)        -> { text, images }   // low-level escape hatch
+cua.call(tool, args)        -> { text }   // low-level escape hatch; its image goes to the model
 ```
 
 ## Feeder integration (agent builders)

@@ -48,7 +48,7 @@ Every request is a JSON object with an `op`. A cell is one streamed tool call.
 | bad request | `{"op":<op?>,"error":<string>}` |
 
 `result` has the same shape as an MCP tool result (`content` is an array of
-`{"type":"text","text":…}` and `{"type":"image","data":<base64>,"mimeType":"image/png"}`).
+`{"type":"text","text":…}` and `{"type":"image","data":<base64>,"mimeType":"image/jpeg"}`).
 Hand it back to the model as the `js` tool's output.
 
 ## Compliance rules

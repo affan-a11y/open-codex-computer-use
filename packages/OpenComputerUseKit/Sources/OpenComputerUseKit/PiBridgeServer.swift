@@ -122,7 +122,7 @@ public final class OpenComputerUsePiBridgeServer {
             case "image":
                 if let base64 = block["data"] as? String {
                     lines.append(Self.encode(["type": "image", "cell": cell, "data": base64,
-                                              "mimeType": block["mimeType"] as? String ?? "image/png"]))
+                                              "mimeType": block["mimeType"] as? String ?? "image/jpeg"]))
                 }
             default:
                 break

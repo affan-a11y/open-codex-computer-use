@@ -101,7 +101,7 @@ enum AgentPreparation {
         let snapshot = try SnapshotBuilder.build(for: app, textLimit: .max,
             recoveryPolicy: .readOnly, windowID: windowID)
         var content = [ToolResultContentItem.text(snapshot.renderedText(style: .fullState))]
-        if let png = snapshot.screenshotPNGData { content.append(.pngImage(png)) }
+        if let data = snapshot.screenshotData { content.append(.jpegImage(data)) }
         return ToolCallResult(content: content)
     }
 

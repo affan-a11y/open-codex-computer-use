@@ -12,7 +12,7 @@ import OpenComputerUseJavaScriptShim
 /// promises or top-level await are needed. Each `js` call runs in its own
 /// function scope (via `new Function`), so `let`/`const` never collide across
 /// calls; assign to `globalThis` for values that must survive to the next call.
-/// Output is produced with `write(...)`; images with `emitImage(base64)`.
+/// Output is produced with `write(...)`; a picture a tool took goes out as an image block.
 final class JavaScriptToolRuntime {
     typealias ToolCaller = (String, [String: Any]) throws -> ToolCallResult
     typealias ElementsProvider = (String) throws -> [[String: Any]]
@@ -78,7 +78,7 @@ final class JavaScriptToolRuntime {
             if !text.isEmpty { text += "\n" }
             text += "Error: " + message
             var content: [ToolResultContentItem] = [.text(text)]
-            content.append(contentsOf: images.map { .pngImage($0) })
+            content.append(contentsOf: images.map { .jpegImage($0) })
             return ToolCallResult(content: content, isError: true)
         }
 
@@ -93,7 +93,7 @@ final class JavaScriptToolRuntime {
 
         var content: [ToolResultContentItem] = []
         if !text.isEmpty { content.append(.text(text)) }
-        content.append(contentsOf: images.map { .pngImage($0) })
+        content.append(contentsOf: images.map { .jpegImage($0) })
         if content.isEmpty { content.append(.text("(no output)")) }
         return ToolCallResult(content: content, isError: false)
     }
@@ -223,7 +223,7 @@ final class JavaScriptToolRuntime {
         }
         var content: [ToolResultContentItem] = []
         if !text.isEmpty { content.append(.text(text)) }
-        content.append(contentsOf: images.map { .pngImage($0) })
+        content.append(contentsOf: images.map { .jpegImage($0) })
         if content.isEmpty { content.append(.text("(no output)")) }
         return ToolCallResult(content: content, isError: cell.failed)
     }
@@ -362,7 +362,10 @@ final class JavaScriptToolRuntime {
         var raw = __ocuCall(tool, JSON.stringify(args || {}));
         var res = JSON.parse(raw);
         if (res.isError) { throw new Error(res.text || ('tool error: ' + tool)); }
-        return res;
+        // A picture never reaches JavaScript: it goes to the model as an image frame, so
+        // write() cannot put it into the text output (which pi cuts at 100k characters).
+        (res.images || []).forEach(function (i) { __ocuEmitImage(i); });
+        return { text: res.text };
       },
       listApps: function () { return this.call('list_apps', {}).text; },
       getAppState: function (app, opts) { return this.call('get_app_state', Object.assign({ app: app }, opts || {})).text; },
@@ -373,7 +376,7 @@ final class JavaScriptToolRuntime {
       drag: function (app, fromX, fromY, toX, toY) { return this.call('drag', { app: app, from_x: fromX, from_y: fromY, to_x: toX, to_y: toY }).text; },
       setValue: function (app, element_index, value) { return this.call('set_value', { app: app, element_index: element_index, value: value }).text; },
       secondaryAction: function (app, element_index, action) { return this.call('perform_secondary_action', { app: app, element_index: element_index, action: action }).text; },
-      screenshot: function (app, opts) { var r = this.call('get_app_state', Object.assign({ app: app }, opts || {})); if (r.images && r.images.length) { __ocuEmitImage(r.images[0]); } return r.text; },
+      screenshot: function (app, opts) { return this.call('get_app_state', Object.assign({ app: app }, opts || {})).text; },
       getState: function (app, opts) {
         var text = this.call('get_app_state', Object.assign({ app: app }, opts || {})).text;
         var res = JSON.parse(__ocuElements(app));
@@ -411,7 +414,6 @@ final class JavaScriptToolRuntime {
       }
     };
     globalThis.write = function (value) { __ocuWrite(typeof value === 'string' ? value : JSON.stringify(value, null, 2)); };
-    globalThis.emitImage = function (base64) { return __ocuEmitImage(String(base64)); };
     globalThis.console = {
       log: function () { __ocuWrite(Array.prototype.slice.call(arguments).map(function (x) { return typeof x === 'string' ? x : JSON.stringify(x); }).join(' ') + '\\n'); }
     };

@@ -214,7 +214,7 @@ turn before acting, exactly as with the underlying actions.
 
 Runtime: synchronous (no promises, no await) because actions run in-process. \
 Print results with write(value); objects are JSON-stringified. console.log works. \
-Surface an image with emitImage(base64). Return values are NOT auto-printed, so \
+Return values are NOT auto-printed, so \
 use write. Each call runs in its own scope, so let/const never collide across \
 calls; assign to globalThis to keep a value for the next call. Pass reset:true to \
 clear all globalThis bindings first. Default timeout 30000 ms; raise timeout_ms \
@@ -237,7 +237,7 @@ Actions (each throws on a tool error; catch with try/catch):
   cua.setValue(app, element_index, value)
   cua.secondaryAction(app, element_index, action)
   cua.listApps()
-  cua.call(tool, args)       // low-level escape hatch: returns { text, images }
+  cua.call(tool, args)       // low-level escape hatch: returns { text }; any image the tool took is shown to the model
 
 Speculative path: predict several steps per call. query() finds controls with a \
 native AX search and NO snapshot or screenshot, returning an `index` you pass to \

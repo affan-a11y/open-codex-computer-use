@@ -18,8 +18,8 @@ name through the CLI (`open-computer-use call click ...`) for debugging.
   that must survive to the next call. Pass `reset: true` to clear all `globalThis`
   bindings before running.
 - **Output:** `write(value)` appends to the result text (objects are
-  JSON-stringified); `console.log(...)` adds a trailing newline. `emitImage(base64)`
-  attaches an image. Return values are not auto-printed; use `write`.
+  JSON-stringified); `console.log(...)` adds a trailing newline. Return values are
+  not auto-printed; use `write`.
 - **Timeout:** `timeout_ms` bounds execution (default 30000 ms). A runaway script
   is terminated through JavaScriptCore's execution time-limit, which the framework
   exports but declares only privately; the shim `OpenComputerUseJavaScriptShim`
@@ -49,7 +49,7 @@ cua.drag(app, from_x, from_y, to_x, to_y)
 cua.setValue(app, element_index, value)
 cua.secondaryAction(app, element_index, action)
 cua.listApps()
-cua.call(tool, args)        // low-level escape hatch: { text, images }
+cua.call(tool, args)        // low-level escape hatch: { text }; its image goes to the model
 ```
 
 Targeted lookup (no snapshot or screenshot):

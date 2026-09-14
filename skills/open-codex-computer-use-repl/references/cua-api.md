@@ -85,9 +85,10 @@ Invoke a secondary accessibility action named in an element's `actions`.
 ### `cua.listApps() -> string`
 Running and recently used apps.
 
-### `cua.call(tool, args) -> { text, images }`
-Low-level escape hatch that calls any underlying action by name. Returns text and
-any base64 images. Refuses `js` (no re-entry).
+### `cua.call(tool, args) -> { text }`
+Low-level escape hatch that calls any underlying action by name. Returns the text;
+any image the tool took is shown to the model with the cell's result, never to the
+program. Refuses `js` (no re-entry).
 
 ### `cua.call("restore_prepared_window", { window_id }) -> string`
 Puts a window `prepare_app` parked back where the user had it while the app
@@ -114,7 +115,6 @@ per action and permanent — later runs go straight through.
 
 - `write(value)` — append to the result; objects are JSON-stringified.
 - `console.log(...)` — same, with a trailing newline.
-- `emitImage(base64)` — attach an image to the result.
 
 ## Runtime notes
 
