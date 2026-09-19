@@ -1960,7 +1960,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueue {
             SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window)
         }
     }
@@ -1970,7 +1970,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueue {
             SoftwareCursorOverlay.settle(at: target.point, in: target.window)
         }
     }
@@ -1980,7 +1980,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueue {
             SoftwareCursorOverlay.pulseClick(
                 at: target.point,
                 clickCount: clickCount,

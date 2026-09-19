@@ -67,7 +67,7 @@ public final class StdioMCPServer {
             case "notifications/initialized":
                 return nil
             case "notifications/turn-ended":
-                VisualCursorSupport.performOnMain {
+                VisualCursorSupport.enqueue {
                     SoftwareCursorOverlay.reset()
                 }
                 return nil

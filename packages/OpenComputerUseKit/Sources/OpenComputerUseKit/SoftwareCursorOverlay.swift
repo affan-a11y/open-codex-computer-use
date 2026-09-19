@@ -8,18 +8,45 @@ public enum VisualCursorSupport {
         visualCursorEnabled(environment: ProcessInfo.processInfo.environment)
     }
 
-    static func performOnMain(_ body: @escaping @MainActor () -> Void) {
+    /// Cursor animations are cosmetic, so off-main callers do not wait for them:
+    /// actions are queued and played in order on the main thread while the tool
+    /// call carries on. A backlog reaches `adaptiveCursorTempo` as a zero gap, so
+    /// the cursor speeds up to catch up. On the main thread (one-shot CLI) there
+    /// is no run loop left to drain a queue, so the action plays inline.
+    static func enqueue(_ body: @escaping @MainActor () -> Void) {
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                body()
+                play(body)
             }
             return
         }
 
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                body()
+                play(body)
             }
+        }
+    }
+
+    @MainActor private static var pending: [@MainActor () -> Void] = []
+    @MainActor private static var draining = false
+
+    @MainActor
+    private static func play(_ body: @escaping @MainActor () -> Void) {
+        pending.append(body)
+        // Animations pump the run loop, so later actions arrive re-entrantly
+        // while one is playing; they wait their turn in `pending`.
+        guard !draining else {
+            return
+        }
+
+        draining = true
+        defer { draining = false }
+        // ponytail: every queued action plays, none are coalesced. At the burst
+        // floor one takes ~40 ms, so the cursor keeps up with 80 ms clicks; drop
+        // intermediate moves here if a slower scale ever lets the backlog grow.
+        while !pending.isEmpty {
+            pending.removeFirst()()
         }
     }
 }
@@ -68,12 +95,23 @@ func visualCursorScreenStateVelocity(
     CGVector(dx: velocity.dx, dy: velocity.dy * yAxisMultiplier)
 }
 
+/// Tempo multiplier for the next cursor action: 1 when the cursor has been idle
+/// for `relaxedGap`, shrinking toward `floor` as actions arrive back to back, the
+/// way a hand speeds up through a burst of clicks. `gap` is the idle time since
+/// the previous action finished.
+func adaptiveCursorTempo(previous: Double, gap: TimeInterval, relaxedGap: TimeInterval = 2, floor: Double) -> Double {
+    let calm = min(max(gap / relaxedGap, 0), 1)
+    let recovered = previous + (1 - previous) * calm
+    return max(min(floor, 1), recovered * (0.6 + 0.4 * calm))
+}
+
 func visualCursorPostInteractionIdleTimeout() -> TimeInterval {
     30
 }
 
+/// Peak idle rotation in radians (about 17 degrees). 0.09 read as stationary.
 func visualCursorIdleRotationAmplitude() -> CGFloat {
-    0.09
+    0.30
 }
 
 public struct VisualCursorObservationPoint: Codable, Sendable {
@@ -113,10 +151,13 @@ struct VisualCursorIdlePose {
     let angleOffset: CGFloat
 }
 
+/// Idle "lazy sway": the tip stays pinned on the last click point and the
+/// pointer rocks around it. The slow second wave keeps the rocking from looping
+/// exactly. `phase` advances 3 per second, so the main sway takes about 2.6 s.
 func visualCursorIdlePose(restingTipPosition: CGPoint, phase: CGFloat) -> VisualCursorIdlePose {
     VisualCursorIdlePose(
         tipPosition: restingTipPosition,
-        angleOffset: sin(phase * 0.8) * visualCursorIdleRotationAmplitude()
+        angleOffset: (sin(phase * 0.8) * 0.8 + sin(phase * 1.9) * 0.2) * visualCursorIdleRotationAmplitude()
     )
 }
 
@@ -197,6 +238,8 @@ enum SoftwareCursorOverlay {
     private static var hideTimer: Timer?
     private static var idlePhase: CGFloat = 0
     private static var observationPhase = "hidden"
+    private static var tempo: Double = 1
+    private static var lastInteractionEnd: CFTimeInterval?
 
     static func moveCursor(to targetPoint: CGPoint, in targetWindow: CursorTargetWindow?) {
         guard VisualCursorSupport.isEnabled, canPresentOverlay else {
@@ -212,11 +255,17 @@ enum SoftwareCursorOverlay {
         let isFreshStart = displayedTipPosition == nil
         let startPoint = displayedTipPosition ?? defaultInitialTipPosition()
         let now = CACurrentMediaTime()
+        tempo = adaptiveCursorTempo(
+            previous: tempo,
+            gap: lastInteractionEnd.map { now - $0 } ?? .infinity,
+            floor: burstTempoFloor
+        )
+        defer { lastInteractionEnd = CACurrentMediaTime() }
 
         observationPhase = "moving"
         panel?.alphaValue = 1
         if isFreshStart {
-            visualDynamicsState = CursorVisualDynamicsAnimator.state(at: startPoint, time: CGFloat(now))
+            visualDynamicsState = CursorVisualDynamicsAnimator.state(at: startPoint, time: CGFloat(dynamicsTime(at: now)))
             placeCursor(using: initialRenderState(at: startPoint), clickProgress: 0)
         } else {
             seedVisualDynamicsIfNeeded(at: startPoint, time: now)
@@ -246,6 +295,7 @@ enum SoftwareCursorOverlay {
         restingTipPosition = constrainedTarget
         observationPhase = "pulse"
         animateClickPulse(at: constrainedTarget, clickCount: max(clickCount, 1), mouseButton: mouseButton)
+        lastInteractionEnd = CACurrentMediaTime()
         startIdleAnimation()
         scheduleHide(after: visualCursorPostInteractionIdleTimeout())
     }
@@ -277,6 +327,8 @@ enum SoftwareCursorOverlay {
         restingTipPosition = nil
         activeTargetWindow = nil
         visualDynamicsState = nil
+        tempo = 1
+        lastInteractionEnd = nil
         observationPhase = "hidden"
         writeObservationSnapshot(tipPosition: nil, rotation: nil)
         panel?.orderOut(nil)
@@ -345,16 +397,51 @@ enum SoftwareCursorOverlay {
         }
     }
 
-    /// Multiplier on the synchronous cursor-animation durations (move glide and
-    /// click pulse), which run on the calling thread and so add to per-action
-    /// latency. Default 0.15 (~6x faster than the modeled macOS cursor) keeps a
-    /// quick hint of motion; OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE overrides it
-    /// (1.0 = original, lower = faster, 0 = instant).
+    /// Multiplier on the cursor-animation durations (move glide and click pulse).
+    /// Tool threads queue these (`VisualCursorSupport.enqueue`) and do not wait;
+    /// only the one-shot CLI, which runs on the main thread, plays them inline.
+    /// Default 0.15 (~6x faster than the modeled macOS cursor) keeps a quick hint
+    /// of motion; OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE overrides it (1.0 =
+    /// original, lower = faster, 0 = instant). Bursts shorten it further, see
+    /// `burstTempoFloor`.
     static let motionDurationScale: Double = {
         guard let raw = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE"],
               let value = Double(raw) else { return 0.15 }
         return max(0, value)
     }()
+
+    /// Lowest tempo a burst of back-to-back actions can reach, as a fraction of
+    /// `motionDurationScale` (see `adaptiveCursorTempo`). Default 0.15;
+    /// OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR overrides it, 1 turns the speed-up off.
+    static let burstTempoFloor: Double = {
+        guard let raw = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR"],
+              let value = Double(raw) else { return 0.15 }
+        return min(max(value, 0), 1)
+    }()
+
+    private static var effectiveDurationScale: Double { motionDurationScale * tempo }
+
+    // The drawn tip follows the path through the visual-dynamics springs. Those
+    // run on this clock, not wall time: while a move or pulse plays it advances
+    // 1 / effectiveDurationScale times faster, so a sped-up animation is the
+    // full-length one played faster and still lands on the target. On wall time
+    // the springs trail a fast glide by hundreds of points.
+    private static var dynamicsClock: CFTimeInterval = 0
+    private static var dynamicsClockWall: CFTimeInterval?
+    private static var dynamicsRate: Double = 1
+
+    private static func dynamicsTime(at wall: CFTimeInterval) -> CFTimeInterval {
+        if let last = dynamicsClockWall {
+            dynamicsClock += max(0, wall - last) * dynamicsRate
+        }
+        dynamicsClockWall = wall
+        return dynamicsClock
+    }
+
+    private static func paceDynamics(_ paced: Bool) {
+        _ = dynamicsTime(at: CACurrentMediaTime())
+        dynamicsRate = paced ? 1 / max(effectiveDurationScale, 0.001) : 1
+    }
 
     private static func animateMove(from start: CGPoint, to end: CGPoint, relativeTo targetWindow: CursorTargetWindow?) {
         let candidate = bestMotionCandidate(from: start, to: end, relativeTo: targetWindow)
@@ -365,8 +452,10 @@ enum SoftwareCursorOverlay {
         let duration = OfficialCursorMotionModel.calibratedTravelDuration(
             distance: distanceBetween(start, end),
             measurement: candidate.measurement
-        ) * motionDurationScale
+        ) * effectiveDurationScale
         let springTargetDuration = OfficialCursorMotionModel.closeEnoughTime
+        paceDynamics(true)
+        defer { paceDynamics(false) }
         let startTime = CACurrentMediaTime()
         var progress: CGFloat = 0
         var springState = CursorMotionSpringState()
@@ -557,9 +646,11 @@ enum SoftwareCursorOverlay {
 
     private static func animateClickPulse(at point: CGPoint, clickCount: Int, mouseButton: MouseButtonKind) {
         let pulseBias: CGFloat = mouseButton == .right ? 0.82 : 1
+        paceDynamics(true)
+        defer { paceDynamics(false) }
 
         for pulse in 0..<clickCount {
-            let duration = 0.16 * motionDurationScale
+            let duration = 0.16 * effectiveDurationScale
             let startTime = CACurrentMediaTime()
 
             while true {
@@ -583,7 +674,7 @@ enum SoftwareCursorOverlay {
             }
 
             if pulse < clickCount - 1 {
-                pause(for: 0.05 * motionDurationScale)
+                pause(for: 0.05 * effectiveDurationScale)
             }
         }
 
@@ -713,7 +804,7 @@ enum SoftwareCursorOverlay {
 
         visualDynamicsState = CursorVisualDynamicsAnimator.state(
             at: tipPosition,
-            time: CGFloat(time)
+            time: CGFloat(dynamicsTime(at: time))
         )
     }
 
@@ -724,6 +815,7 @@ enum SoftwareCursorOverlay {
     ) -> CursorVisualRenderState {
         let clampedTarget = clampTipPosition(targetTipPosition)
         seedVisualDynamicsIfNeeded(at: clampedTarget, time: time)
+        let time = dynamicsTime(at: time)
 
         let result = CursorVisualDynamicsAnimator.advance(
             state: visualDynamicsState ?? CursorVisualDynamicsAnimator.state(at: clampedTarget, time: CGFloat(time)),

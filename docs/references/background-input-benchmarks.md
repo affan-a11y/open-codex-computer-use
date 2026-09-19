@@ -43,6 +43,49 @@ exactly one per cycle; a double-fire would fail the run.
 Observed latency barely moved (Chromium-internal work dominates it); the returned-call latency
 is what the tuning removed.
 
+### Visual cursor animation, 2026-09-19
+
+The numbers above call the dispatchers directly. The `click` tool also drives the software cursor:
+`moveCursor` glides to the target before the click and `pulseClick` plays after it.
+`CursorAnimationLatencyLiveTests`, 670 pt moves (the glide duration does not depend on distance),
+macOS 27.0 (26A428).
+
+**Before (animation ran synchronously on the tool thread), 20 cycles:**
+
+| `OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE` | `moveCursor` mean | `pulseClick` mean | Added per click |
+| --- | --- | --- | --- |
+| 1 (original animation; builds before 2026-09-12) | 1435.4 ms | 167.1 ms | 1602.6 ms |
+| 0.15 (default) | 218.6 ms | 30.3 ms | 248.9 ms |
+| 0 | 7.4 ms | 4.7 ms | 12.2 ms |
+
+That made a `sky_click` tool call about 1.7 s at scale 1 and about 0.33 s at the default.
+
+**Now:** tool threads queue cursor actions (`VisualCursorSupport.enqueue`) and do not wait. The
+queue plays every action in order on the main thread. Only the one-shot CLI, which runs on the
+main thread, still plays them inline.
+
+| Measurement | Scale 0.15 | Scale 1 |
+| --- | --- | --- |
+| Tool thread blocked while queueing 10 clicks | 0.06 ms | 0.05 ms |
+| Cursor finished all 10 clicks after | 922 ms | 5070 ms |
+
+**Adaptive tempo:** each action's duration is scaled by a tempo that drops when actions arrive
+back to back and returns to 1 after 2 s idle (`adaptiveCursorTempo`). Floor is
+`OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR` (default 0.15 of the base scale; 1 turns it off).
+
+| Scale | `moveCursor` per back-to-back cycle | After 2.2 s idle |
+| --- | --- | --- |
+| 0.15 | 241, 136, 81, 54, 35, 40, 42, 37 ms | 224 ms |
+| 1 | 1457, 864, 517, 314, 219, 220, 221, 226 ms | 1437 ms |
+
+**Accuracy:** the drawn tip follows the path through the visual-dynamics springs. On wall time
+those springs trailed a fast glide: at the burst floor the tip was 320 to 376 pt short of the
+target when the pulse started. They now run on a clock paced with the animation, so a fast
+glide is the full-length one played faster. Landing error at pulse start: max 0.1 pt (scale
+0.15) and 0.2 pt (scale 1) over 20 cycles.
+
+`OPEN_COMPUTER_USE_VISUAL_CURSOR=0` removes the overlay entirely.
+
 ## 2. Which gaps can be zero: the sweep that set the defaults
 
 Same benchmark, 30 cycles per row, unpinned. Knobs: `FOCUS` = gap after each synthetic
@@ -195,6 +238,11 @@ OPEN_COMPUTER_USE_RUN_BACKGROUND_BENCH=1 OPEN_COMPUTER_USE_BENCH_CYCLES=50 OPEN_
 OPEN_COMPUTER_USE_RUN_BACKGROUND_BENCH=1 OPEN_COMPUTER_USE_BENCH_CYCLES=30 OPEN_COMPUTER_USE_BENCH_UNPINNED=1 \
   OPEN_COMPUTER_USE_FOCUS_RECORD_SETTLE_MS=0 OPEN_COMPUTER_USE_SKY_CLICK_DELAY_SCALE=0.1 \
   swift test --filter BackgroundInputBenchmarkLiveTests
+
+# visual cursor: queueing cost, burst tempo, landing error (scale 1 = original, default 0.15)
+OPEN_COMPUTER_USE_RUN_CURSOR_BENCH=1 OPEN_COMPUTER_USE_CURSOR_DURATION_SCALE=1 \
+  OPEN_COMPUTER_USE_VISUAL_CURSOR_OBSERVATION_FILE=/tmp/cursor-observation.json \
+  swift test --filter CursorAnimationLatencyLiveTests
 
 # live regressions
 OPEN_COMPUTER_USE_RUN_SKY_KEY_LIVE_TEST=1 swift test --filter SkyKeyboardLiveTests

@@ -88,7 +88,7 @@ final class BackgroundInputBenchmarkLiveTests: XCTestCase {
             return sorted[index]
         }
         func row(_ name: String, _ values: [Double]) -> String {
-            String(format: "BENCH %-22@ n=%2d p50=%7.1fms p95=%7.1fms max=%7.1fms", name, values.count, pct(values, 0.5), pct(values, 0.95), values.max() ?? .nan)
+            String(format: "BENCH %-22@ n=%2d mean=%7.1fms p50=%7.1fms p95=%7.1fms max=%7.1fms", name, values.count, values.isEmpty ? .nan : values.reduce(0, +) / Double(values.count), pct(values, 0.5), pct(values, 0.95), values.max() ?? .nan)
         }
         print("BENCH cycles=\(cycles) pinned=\(pinned) keySettle=\(Int(SkyKeyboardDispatcher.keyWindowFallbackSettle * 1000))ms release=\(Int(SkyKeyboardDispatcher.releaseSettle * 1000))ms target=covered isolated Chrome (macOS \(ProcessInfo.processInfo.operatingSystemVersionString))")
         print("BENCH sky_click success \(clickOK)/\(cycles)   sky_key success \(keyOK)/\(cycles)   frontmost unchanged=\(frontBefore == frontAfter)")
