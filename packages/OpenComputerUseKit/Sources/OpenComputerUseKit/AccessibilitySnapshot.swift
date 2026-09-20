@@ -784,12 +784,14 @@ private struct TreeRenderer {
     var records: [Int: ElementRecord] = [:]
     var identifierIndex: [String: String] = [:]
     var focusedSummary: String?
+    private let scans = NodeScans()
 
     init(context: RenderContext) {
         self.context = context
     }
 
-    mutating func render(_ root: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {
+    /// `webAreaDistance` is how far below the outermost web area `root` sits; nil outside one.
+    mutating func render(_ root: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = [], webAreaDistance: Int? = nil) {
         guard shouldContinueRendering(nextIndex: nextIndex, depth: depth, limits: context.treeLimits) else {
             return
         }
@@ -800,28 +802,30 @@ private struct TreeRenderer {
         let nextAncestors = ancestors + [root]
 
         let index = nextIndex
+        let node = scans.node(root)
 
-        let role = stringValue(of: root, attribute: kAXRoleAttribute) ?? "AXUnknown"
+        let role = stringValue(of: node, attribute: kAXRoleAttribute) ?? "AXUnknown"
         if role == axWebAreaRole {
             hasWebArea = true
         }
-        let subrole = stringValue(of: root, attribute: kAXSubroleAttribute)
-        let baseRoleText = roleDescription(of: root, role: role, subrole: subrole)
-        let label = stringValue(of: root, attribute: kAXDescriptionAttribute)
+        let subrole = stringValue(of: node, attribute: kAXSubroleAttribute)
+        let baseRoleText = roleDescription(of: node, role: role, subrole: subrole)
+        let label = stringValue(of: node, attribute: kAXDescriptionAttribute)
             .map { sanitizeText($0, textLimit: context.textLimit) }
-        let help = stringValue(of: root, attribute: kAXHelpAttribute)
+        let help = stringValue(of: node, attribute: kAXHelpAttribute)
             .map { sanitizeText($0, textLimit: context.textLimit) }
-        let value = sanitizedValue(of: root, textLimit: context.textLimit)
-        let axIdentifier = displayIdentifier(stringValue(of: root, attribute: kAXIdentifierAttribute))
-        let traits = summarizeTraits(of: root)
+        let value = sanitizedValue(of: node, textLimit: context.textLimit)
+        let axIdentifier = displayIdentifier(stringValue(of: node, attribute: kAXIdentifierAttribute))
+        let traits = summarizeTraits(of: node)
         let actions = copyActions(root) ?? []
         let exposesPrimaryClickAction = hasPrimaryClickAction(actions)
         let prettyActions = meaningfulActions(actions, role: role)
-        let placeholder = placeholderValue(of: root, textLimit: context.textLimit)
-        let webAreaDepth = webAreaDepth(role: role, ancestors: ancestors)
-        let localFrame = resolveLocalFrame(of: root, windowBounds: context.windowBounds)
+        let placeholder = placeholderValue(of: node, textLimit: context.textLimit)
+        let webAreaDepth = role == axWebAreaRole ? 0 : webAreaDistance
+        let childWebAreaDistance = webAreaDistance.map { $0 + 1 } ?? (role == axWebAreaRole ? 1 : nil)
+        let localFrame = resolveLocalFrame(of: node, windowBounds: context.windowBounds)
         let rowTexts = role == kAXRowRole as String ? flattenedRowTexts(of: root, textLimit: context.textLimit) : []
-        let childElements = children(of: root)
+        let childElements = children(of: node)
         let hasActionableLinkDescendant =
             (role == kAXGroupRole as String || role == kAXUnknownRole as String)
             && exposesPrimaryClickAction
@@ -854,7 +858,7 @@ private struct TreeRenderer {
                 summaryImageCount: summaryImageChildren.count
             )
         let title = preferredDisplayTitle(
-            for: root,
+            for: node,
             role: role,
             label: label,
             identifier: axIdentifier,
@@ -862,9 +866,9 @@ private struct TreeRenderer {
             rowTexts: rowTexts,
             textLimit: context.textLimit
         )
-        let linkText = role == "AXLink" ? markdownLinkText(for: root, title: title, label: label, value: value, textLimit: context.textLimit) : nil
+        let linkText = role == "AXLink" ? markdownLinkText(for: node, title: title, label: label, value: value, textLimit: context.textLimit) : nil
         let displayTitle = linkText ?? title
-        let inlineRowSummary = outlineRowSummary(for: root, role: role)
+        let inlineRowSummary = outlineRowSummary(for: node, role: role)
         let hidesChildren = shouldSuppressChildren(
             role: role,
             title: displayTitle,
@@ -899,7 +903,7 @@ private struct TreeRenderer {
             preservesCompactGenericActionTarget: rendersCompactGenericActionTarget
         ) {
             for child in childElements {
-                render(child, depth: depth, ancestors: nextAncestors)
+                render(child, depth: depth, ancestors: nextAncestors, webAreaDistance: childWebAreaDistance)
             }
             return
         }
@@ -920,9 +924,9 @@ private struct TreeRenderer {
             }
             return " Help: \(help)"
         }()
-        let urlSegment = formattedURLSegment(for: root, title: displayTitle, label: label, textLimit: context.textLimit)
+        let urlSegment = formattedURLSegment(for: node, title: displayTitle, label: label, textLimit: context.textLimit)
         let identifierSegment = displayIdentifierSegment(for: root, role: role, identifier: axIdentifier, title: displayTitle)
-        let rawValueSegment = formattedValueSegment(for: root, roleText: roleText, title: displayTitle, value: value)
+        let rawValueSegment = formattedValueSegment(for: node, roleText: roleText, title: displayTitle, value: value)
         let valueSegment = formattedValueSegmentWithSeparator(
             rawValueSegment,
             precedingSegments: [labelSegment, helpSegment, urlSegment, identifierSegment]
@@ -971,7 +975,7 @@ private struct TreeRenderer {
             focusedSummary = lineBody
         }
 
-        if role == kAXRowRole as String, boolValue(of: root, attribute: kAXSelectedAttribute) != true {
+        if role == kAXRowRole as String, boolValue(of: node, attribute: kAXSelectedAttribute) != true {
             for text in Array(rowTexts.dropFirst()) {
                 lines.append(text)
             }
@@ -981,7 +985,7 @@ private struct TreeRenderer {
         if rendersSummaryAsChildren, let genericTextSummary {
             renderSyntheticText(genericTextSummary, representedBy: root, depth: depth + 1)
             for image in summaryImageChildren {
-                render(image, depth: depth + 1, ancestors: nextAncestors)
+                render(image, depth: depth + 1, ancestors: nextAncestors, webAreaDistance: childWebAreaDistance)
             }
             return
         }
@@ -991,7 +995,7 @@ private struct TreeRenderer {
         }
 
         for child in childElements {
-            render(child, depth: depth + 1, ancestors: nextAncestors)
+            render(child, depth: depth + 1, ancestors: nextAncestors, webAreaDistance: childWebAreaDistance)
         }
     }
 
@@ -1020,21 +1024,7 @@ private struct TreeRenderer {
         String(CFHash(element))
     }
 
-    private func webAreaDepth(role: String, ancestors: [AXUIElement]) -> Int? {
-        if role == axWebAreaRole {
-            return 0
-        }
-
-        guard let webAreaIndex = ancestors.firstIndex(where: { ancestor in
-            stringValue(of: ancestor, attribute: kAXRoleAttribute) == axWebAreaRole
-        }) else {
-            return nil
-        }
-
-        return ancestors.count - webAreaIndex
-    }
-
-    private func children(of element: AXUIElement) -> [AXUIElement] {
+    private func children(of element: some AXAttributeSource) -> [AXUIElement] {
         let role = stringValue(of: element, attribute: kAXRoleAttribute)
         let rows = copyArray(element, attribute: kAXRowsAttribute) ?? []
         let visibleChildren = copyArray(element, attribute: axVisibleChildrenAttribute) ?? []
@@ -1058,7 +1048,7 @@ private struct TreeRenderer {
             let values = attribute == kAXRowsAttribute ? visibleRows(in: sourceValues, parent: element) : sourceValues
 
             for child in values {
-                if shouldSkipChild(child, of: element) {
+                if shouldSkipChild(child, parentRole: role) {
                     continue
                 }
 
@@ -1086,16 +1076,17 @@ private struct TreeRenderer {
                 continue
             }
 
-            let role = stringValue(of: element, attribute: kAXRoleAttribute) ?? ""
+            let node = scans.node(element)
+            let role = stringValue(of: node, attribute: kAXRoleAttribute) ?? ""
             if role == "AXLink",
-               let url = urlValue(of: element, attribute: kAXURLAttribute, textLimit: textLimit),
+               let url = urlValue(of: node, attribute: kAXURLAttribute, textLimit: textLimit),
                !url.isEmpty
             {
                 return true
             }
 
             if containsActionableLinkDescendant(
-                in: children(of: element),
+                in: children(of: node),
                 textLimit: textLimit,
                 ancestors: ancestors + [element],
                 depth: depth + 1
@@ -1132,8 +1123,7 @@ private func usesVisibleChildrenAsPrimaryRole(_ role: String?) -> Bool {
     role == kAXListRole as String
 }
 
-private func shouldSkipChild(_ child: AXUIElement, of parent: AXUIElement) -> Bool {
-    let parentRole = stringValue(of: parent, attribute: kAXRoleAttribute)
+private func shouldSkipChild(_ child: AXUIElement, parentRole: String?) -> Bool {
     guard parentRole == kAXMenuBarRole as String else {
         return false
     }
@@ -1149,7 +1139,7 @@ func shouldContinueRendering(
     nextIndex < limits.maxNodeCount && depth < limits.maxDepth
 }
 
-private func summarizeTraits(of element: AXUIElement) -> [String] {
+private func summarizeTraits(of element: some AXAttributeSource) -> [String] {
     var values: [String] = []
 
     if boolValue(of: element, attribute: kAXSelectedAttribute) == true {
@@ -1164,22 +1154,19 @@ private func summarizeTraits(of element: AXUIElement) -> [String] {
         values.append("disabled")
     }
 
-    if isSettable(of: element, attribute: kAXValueAttribute) {
+    if isSettable(of: element.element, attribute: kAXValueAttribute) {
         values.append("settable")
-    }
 
-    if let valueType = valueTypeTrait(of: element) {
-        values.append(valueType)
+        if let valueType = valueTypeTrait(of: element) {
+            values.append(valueType)
+        }
     }
 
     return values
 }
 
-private func valueTypeTrait(of element: AXUIElement) -> String? {
-    guard isSettable(of: element, attribute: kAXValueAttribute) else {
-        return nil
-    }
-
+/// The value's type, for a node whose value is settable.
+private func valueTypeTrait(of element: some AXAttributeSource) -> String? {
     guard let value = attributeValue(of: element, attribute: kAXValueAttribute) else {
         return nil
     }
@@ -1199,6 +1186,124 @@ private func valueTypeTrait(of element: AXUIElement) -> String? {
     return nil
 }
 
+/// Where a node's attribute values come from: the element itself, one IPC call
+/// per attribute, or a `ScannedNode` that read them all in one call.
+private protocol AXAttributeSource {
+    var element: AXUIElement { get }
+    func attributeValue(_ attribute: String) -> CFTypeRef?
+}
+
+extension AXUIElement: AXAttributeSource {
+    fileprivate var element: AXUIElement { self }
+
+    fileprivate func attributeValue(_ attribute: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(self, attribute as CFString, &value)
+        guard error == .success else {
+            return nil
+        }
+
+        return value
+    }
+}
+
+/// A node of the tree walk: every attribute the walk asks of a node, read in one
+/// call. An attribute the walk asks for belongs in `attributes`.
+private struct ScannedNode: AXAttributeSource {
+    static let attributes: [String] = [
+        kAXRoleAttribute as String,
+        kAXSubroleAttribute as String,
+        kAXRoleDescriptionAttribute as String,
+        kAXTitleAttribute as String,
+        kAXDescriptionAttribute as String,
+        kAXHelpAttribute as String,
+        kAXValueAttribute as String,
+        kAXIdentifierAttribute as String,
+        kAXSelectedAttribute as String,
+        kAXExpandedAttribute as String,
+        kAXEnabledAttribute as String,
+        "AXPlaceholderValue",
+        "AXPlaceholder",
+        kAXURLAttribute as String,
+        kAXPositionAttribute as String,
+        kAXSizeAttribute as String,
+        kAXChildrenAttribute as String,
+        kAXRowsAttribute as String,
+        axContentsAttribute,
+        axVisibleChildrenAttribute,
+    ]
+
+    let element: AXUIElement
+    private let values: [String: AnyObject]
+
+    init(_ element: AXUIElement) {
+        self.element = element
+        var values: [String: AnyObject] = [:]
+        for (attribute, value) in zip(Self.attributes, copyAttributeValues(of: element, attributes: Self.attributes)) {
+            // An attribute the node lacks comes back as an error value in its slot.
+            if value is NSNull || (CFGetTypeID(value) == AXValueGetTypeID() && AXValueGetType(value as! AXValue) == .axError) {
+                continue
+            }
+            values[attribute] = value
+        }
+        self.values = values
+    }
+
+    func attributeValue(_ attribute: String) -> CFTypeRef? {
+        values[attribute]
+    }
+}
+
+/// The nodes one walk has scanned. The link check under a clickable group looks
+/// at nodes ahead of their turn; the walk then reaches them without reading again.
+private final class NodeScans {
+    private struct Key: Hashable {
+        let element: AXUIElement
+
+        static func == (lhs: Key, rhs: Key) -> Bool {
+            CFEqual(lhs.element, rhs.element)
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(CFHash(element))
+        }
+    }
+
+    private var nodes: [Key: ScannedNode] = [:]
+
+    func node(_ element: AXUIElement) -> ScannedNode {
+        let key = Key(element: element)
+        if let node = nodes[key] {
+            return node
+        }
+
+        let node = ScannedNode(element)
+        nodes[key] = node
+        return node
+    }
+}
+
+/// Read several attributes in a single `AXUIElementCopyMultipleAttributeValues`
+/// IPC call (falls back to individual reads if the batch call is unsupported).
+private func copyAttributeValues(of element: AXUIElement, attributes: [String]) -> [AnyObject] {
+    var values: CFArray?
+    let error = AXUIElementCopyMultipleAttributeValues(
+        element,
+        attributes as CFArray,
+        AXCopyMultipleAttributeOptions(),
+        &values
+    )
+    if error == .success, let array = values as? [AnyObject], array.count == attributes.count {
+        return array
+    }
+
+    return attributes.map { attribute -> AnyObject in
+        var v: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(element, attribute as CFString, &v)
+        return v ?? (NSNull() as AnyObject)
+    }
+}
+
 private func copyElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
@@ -1209,14 +1314,8 @@ private func copyElement(_ element: AXUIElement, attribute: String) -> AXUIEleme
     return (value as! AXUIElement)
 }
 
-private func copyArray(_ element: AXUIElement, attribute: String) -> [AXUIElement]? {
-    var value: CFTypeRef?
-    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-    guard error == .success, let value else {
-        return nil
-    }
-
-    return value as? [AXUIElement]
+private func copyArray(_ source: some AXAttributeSource, attribute: String) -> [AXUIElement]? {
+    source.attributeValue(attribute) as? [AXUIElement]
 }
 
 private func copyActions(_ element: AXUIElement) -> [String]? {
@@ -1229,17 +1328,11 @@ private func copyActions(_ element: AXUIElement) -> [String]? {
     return actions as? [String]
 }
 
-private func attributeValue(of element: AXUIElement, attribute: String) -> CFTypeRef? {
-    var value: CFTypeRef?
-    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-    guard error == .success else {
-        return nil
-    }
-
-    return value
+private func attributeValue(of source: some AXAttributeSource, attribute: String) -> CFTypeRef? {
+    source.attributeValue(attribute)
 }
 
-private func stringValue(of element: AXUIElement, attribute: String) -> String? {
+private func stringValue(of element: some AXAttributeSource, attribute: String) -> String? {
     guard let value = attributeValue(of: element, attribute: attribute) else {
         return nil
     }
@@ -1264,7 +1357,7 @@ private func copySelectedText(_ element: AXUIElement, textLimit: SnapshotTextLim
     return sanitized.isEmpty ? nil : sanitized
 }
 
-private func boolValue(of element: AXUIElement, attribute: String) -> Bool? {
+private func boolValue(of element: some AXAttributeSource, attribute: String) -> Bool? {
     guard let value = attributeValue(of: element, attribute: attribute) else {
         return nil
     }
@@ -1284,7 +1377,7 @@ private func isSettable(of element: AXUIElement, attribute: String) -> Bool {
     return error == .success && settable.boolValue
 }
 
-private func sanitizedValue(of element: AXUIElement, textLimit: SnapshotTextLimit = .defaults) -> String? {
+private func sanitizedValue(of element: some AXAttributeSource, textLimit: SnapshotTextLimit = .defaults) -> String? {
     if let string = stringValue(of: element, attribute: kAXValueAttribute) {
         let sanitized = sanitizeText(string, textLimit: textLimit)
         return sanitized.isEmpty ? nil : sanitized
@@ -1305,7 +1398,7 @@ private func sanitizedValue(of element: AXUIElement, textLimit: SnapshotTextLimi
     return nil
 }
 
-private func placeholderValue(of element: AXUIElement, textLimit: SnapshotTextLimit = .defaults) -> String? {
+private func placeholderValue(of element: some AXAttributeSource, textLimit: SnapshotTextLimit = .defaults) -> String? {
     for attribute in ["AXPlaceholderValue", "AXPlaceholder"] {
         if let string = stringValue(of: element, attribute: attribute) {
             let sanitized = sanitizeText(string, textLimit: textLimit)
@@ -1318,7 +1411,7 @@ private func placeholderValue(of element: AXUIElement, textLimit: SnapshotTextLi
     return nil
 }
 
-private func numericValueRepresentsBoolean(for element: AXUIElement, value: CFTypeRef) -> Bool {
+private func numericValueRepresentsBoolean(for element: some AXAttributeSource, value: CFTypeRef) -> Bool {
     guard let number = value as? NSNumber else {
         return false
     }
@@ -1340,7 +1433,7 @@ private func numericValueRepresentsBoolean(for element: AXUIElement, value: CFTy
 }
 
 private func preferredDisplayTitle(
-    for element: AXUIElement,
+    for element: some AXAttributeSource,
     role: String,
     label: String?,
     identifier: String?,
@@ -1383,7 +1476,7 @@ private func preferredDisplayTitle(
 }
 
 private func markdownLinkText(
-    for element: AXUIElement,
+    for element: some AXAttributeSource,
     title: String?,
     label: String?,
     value: String?,
@@ -1417,7 +1510,7 @@ private func markdownEscapedLinkText(_ text: String) -> String {
         .replacingOccurrences(of: "]", with: "\\]")
 }
 
-private func outlineRowSummary(for element: AXUIElement, role: String) -> String? {
+private func outlineRowSummary(for element: some AXAttributeSource, role: String) -> String? {
     guard role == kAXOutlineRole as String || role == kAXListRole as String else {
         return nil
     }
@@ -1434,7 +1527,7 @@ private func outlineRowSummary(for element: AXUIElement, role: String) -> String
     return "(showing 0-\(visibleRows.count - 1) of \(allRows.count) items)"
 }
 
-private func formattedValueSegment(for element: AXUIElement, roleText: String, title: String?, value: String?) -> String {
+private func formattedValueSegment(for element: some AXAttributeSource, roleText: String, title: String?, value: String?) -> String {
     guard let value, !value.isEmpty else {
         return ""
     }
@@ -1515,7 +1608,7 @@ private func shouldCommaSeparateActions(
 }
 
 private func formattedURLSegment(
-    for element: AXUIElement,
+    for element: some AXAttributeSource,
     title: String?,
     label: String?,
     textLimit: SnapshotTextLimit = .defaults
@@ -1536,7 +1629,7 @@ private func formattedURLSegment(
 }
 
 private func urlValue(
-    of element: AXUIElement,
+    of element: some AXAttributeSource,
     attribute: String,
     textLimit: SnapshotTextLimit = .defaults
 ) -> String? {
@@ -1569,16 +1662,10 @@ private func displayIdentifierSegment(for element: AXUIElement, role: String, id
     return " ID: \(identifier)"
 }
 
-private func resolveLocalFrame(of element: AXUIElement, windowBounds: CGRect?) -> CGRect? {
-    var positionValue: CFTypeRef?
-    var sizeValue: CFTypeRef?
-    let positionError = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
-    let sizeError = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+private func resolveLocalFrame(of element: some AXAttributeSource, windowBounds: CGRect?) -> CGRect? {
     guard
-        positionError == .success,
-        sizeError == .success,
-        let positionValue,
-        let sizeValue
+        let positionValue = attributeValue(of: element, attribute: kAXPositionAttribute),
+        let sizeValue = attributeValue(of: element, attribute: kAXSizeAttribute)
     else {
         return nil
     }
@@ -1896,7 +1983,7 @@ func windowRelativeFrame(elementFrame: CGRect, windowBounds: CGRect) -> CGRect {
     )
 }
 
-private func roleDescription(of element: AXUIElement, role: String, subrole: String?) -> String {
+private func roleDescription(of element: some AXAttributeSource, role: String, subrole: String?) -> String {
     if role == kAXRowRole as String {
         return "row"
     }
@@ -2206,7 +2293,7 @@ func summaryMarkdownLinkText(text: String, url: String) -> String {
     "[\(markdownEscapedLinkText(text))](\(url))"
 }
 
-private func visibleRows(in rows: [AXUIElement], parent: AXUIElement) -> [AXUIElement] {
+private func visibleRows(in rows: [AXUIElement], parent: some AXAttributeSource) -> [AXUIElement] {
     guard let parentFrame = resolveLocalFrame(of: parent, windowBounds: nil) else {
         return Array(rows.prefix(20))
     }
@@ -2467,26 +2554,8 @@ extension SnapshotBuilder {
         let globalFrame: CGRect?
     }
 
-    /// Read the scan attributes in a single `AXUIElementCopyMultipleAttributeValues`
-    /// IPC call (falls back to individual reads if the batch call is unsupported).
     private static func batchScan(_ element: AXUIElement) -> NodeScan {
-        var values: CFArray?
-        let error = AXUIElementCopyMultipleAttributeValues(
-            element,
-            searchScanAttributes as CFArray,
-            AXCopyMultipleAttributeOptions(),
-            &values
-        )
-        let raw: [AnyObject]
-        if error == .success, let array = values as? [AnyObject], array.count == searchScanAttributes.count {
-            raw = array
-        } else {
-            raw = searchScanAttributes.map { attribute -> AnyObject in
-                var v: CFTypeRef?
-                _ = AXUIElementCopyAttributeValue(element, attribute as CFString, &v)
-                return v ?? (NSNull() as AnyObject)
-            }
-        }
+        let raw = copyAttributeValues(of: element, attributes: searchScanAttributes)
         func str(_ i: Int) -> String? { raw[i] as? String }
         return NodeScan(
             role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),

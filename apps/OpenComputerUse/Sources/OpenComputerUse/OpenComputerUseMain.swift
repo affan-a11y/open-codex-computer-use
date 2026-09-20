@@ -43,21 +43,25 @@ enum OpenComputerUseMain {
             let server = StdioMCPServer(service: service)
             if VisualCursorSupport.isEnabled {
                 try MainActor.assumeIsolated {
-                    try MCPAppRuntime.run(server: server)
+                    try MCPAppRuntime.run { try server.run() }
                 }
             } else {
                 try server.run()
             }
         case .stream:
+            let server = OpenComputerUseStreamServer()
             if VisualCursorSupport.isEnabled {
-                _ = NSApplication.shared.setActivationPolicy(.accessory)
+                try MCPAppRuntime.run { server.run() }
+            } else {
+                server.run()
             }
-            OpenComputerUseStreamServer().run()
         case .piBridge:
+            let server = OpenComputerUsePiBridgeServer()
             if VisualCursorSupport.isEnabled {
-                _ = NSApplication.shared.setActivationPolicy(.accessory)
+                try MCPAppRuntime.run { server.run() }
+            } else {
+                server.run()
             }
-            OpenComputerUsePiBridgeServer().run()
         case .doctor:
             let permissions = PermissionDiagnostics.current()
             print(permissions.summary)

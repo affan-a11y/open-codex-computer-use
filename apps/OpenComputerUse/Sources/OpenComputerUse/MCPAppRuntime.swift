@@ -2,21 +2,24 @@ import AppKit
 import Foundation
 import OpenComputerUseKit
 
+/// Runs a stdio server's read loop (mcp, stream, pi-bridge) on its own thread and
+/// keeps the main thread for the app, so the drawn cursor plays there while a
+/// tool call carries on.
 final class MCPAppRuntime: NSObject, NSApplicationDelegate {
-    private let server: StdioMCPServer
+    private let readLoop: () throws -> Void
     private var runtimeError: Error?
     private var turnEndedObserver: NSObjectProtocol?
 
-    private init(server: StdioMCPServer) {
-        self.server = server
+    private init(readLoop: @escaping () throws -> Void) {
+        self.readLoop = readLoop
     }
 
     @MainActor
-    static func run(server: StdioMCPServer) throws {
+    static func run(_ readLoop: @escaping () throws -> Void) throws {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
 
-        let delegate = MCPAppRuntime(server: server)
+        let delegate = MCPAppRuntime(readLoop: readLoop)
         application.delegate = delegate
         application.run()
 
@@ -51,7 +54,7 @@ final class MCPAppRuntime: NSObject, NSApplicationDelegate {
     @objc
     private func processStandardIO() {
         do {
-            try server.run()
+            try readLoop()
         } catch {
             runtimeError = error
         }

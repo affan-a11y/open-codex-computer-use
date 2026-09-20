@@ -763,7 +763,7 @@ public final class ComputerUseService {
             throw ComputerUseError.message("AXUIElementPerformAction failed with \(result.rawValue)")
         }
 
-        Thread.sleep(forTimeInterval: 0.15)
+        pauseBeforeReadBack(0.15)
         return try actionResult(for: query)
     }
 
@@ -845,7 +845,7 @@ public final class ComputerUseService {
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
-            Thread.sleep(forTimeInterval: 0.1)
+            pauseBeforeReadBack(0.1)
             return try actionResult(for: query)
         }
 
@@ -928,7 +928,7 @@ public final class ComputerUseService {
                 throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
             }
 
-            Thread.sleep(forTimeInterval: 0.1)
+            pauseBeforeReadBack(0.1)
         } catch {
             settleVisualCursor(at: cursorTarget)
             throw error
@@ -966,6 +966,17 @@ public final class ComputerUseService {
             return liteSnapshot(context: context, elements: [index: record])
         }
         return try currentSnapshot(for: query)
+    }
+
+    /// An action's result reads the window back, so the app gets a beat to redraw
+    /// first. In JavaScript execution nothing is read back, so there is no wait;
+    /// a program that needs the new state asks for it with `cua.waitFor`.
+    private func pauseBeforeReadBack(_ interval: TimeInterval) {
+        guard !javaScriptExecutionActive else {
+            return
+        }
+
+        Thread.sleep(forTimeInterval: interval)
     }
 
     /// The result an action returns. In the normal path this is the after-action
@@ -1202,7 +1213,7 @@ public final class ComputerUseService {
 
         switch result {
         case .success:
-            Thread.sleep(forTimeInterval: 0.15)
+            pauseBeforeReadBack(0.15)
             return true
         case .failure, .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
             return false
@@ -1247,21 +1258,21 @@ public final class ComputerUseService {
         if preferContainingWebRowAXClick,
            try performContainingWebRowClick(for: record, snapshot: snapshot, button: button, clickCount: clickCount)
         {
-            Thread.sleep(forTimeInterval: 0.15)
+            pauseBeforeReadBack(0.15)
             return true
         }
 
         if !preferContainingWebRowAXClick {
             if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
                 debugClickDecision("handled by preferred target \(clickDebugDescription(record))")
-                Thread.sleep(forTimeInterval: 0.15)
+                pauseBeforeReadBack(0.15)
                 return true
             }
 
             for candidate in descendantClickCandidates(for: record, snapshot: snapshot) {
                 if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                     debugClickDecision("handled by descendant \(clickDebugDescription(candidate))")
-                    Thread.sleep(forTimeInterval: 0.15)
+                    pauseBeforeReadBack(0.15)
                     return true
                 }
             }
@@ -1276,7 +1287,7 @@ public final class ComputerUseService {
                        try performPreferredClick(on: hitRecord, button: button, clickCount: clickCount)
                     {
                         debugClickDecision("handled by hit record \(clickDebugDescription(hitRecord))")
-                        Thread.sleep(forTimeInterval: 0.15)
+                        pauseBeforeReadBack(0.15)
                         return true
                     }
 
@@ -1291,7 +1302,7 @@ public final class ComputerUseService {
                         ) {
                             if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                                 debugClickDecision("handled by hit descendant \(clickDebugDescription(candidate))")
-                                Thread.sleep(forTimeInterval: 0.15)
+                                pauseBeforeReadBack(0.15)
                                 return true
                             }
                         }
@@ -1312,7 +1323,7 @@ public final class ComputerUseService {
 
         if try activateClickTarget(element: element, availableActions: record.rawActions) {
             debugClickDecision("handled by activation fallback \(clickDebugDescription(record))")
-            Thread.sleep(forTimeInterval: 0.15)
+            pauseBeforeReadBack(0.15)
             return true
         }
 
