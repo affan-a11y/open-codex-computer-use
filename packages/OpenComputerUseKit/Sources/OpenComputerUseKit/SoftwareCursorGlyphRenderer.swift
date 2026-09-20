@@ -275,7 +275,7 @@ func loadReferenceCursorWindowImage() -> NSImage? {
         forResource: SoftwareCursorGlyphMetrics.referenceImageResourceName,
         withExtension: "png"
     ), let image = NSImage(contentsOf: bundledReference) {
-        return image
+        return divineYellow(image)
     }
 
     let fileURL = URL(fileURLWithPath: #filePath).standardizedFileURL
@@ -289,5 +289,141 @@ func loadReferenceCursorWindowImage() -> NSImage? {
     let referenceURL = repoRoot
         .appendingPathComponent("docs/references/codex-computer-use-reverse-engineering/assets/extracted-2026-04-19/\(SoftwareCursorGlyphMetrics.referenceImageResourceName).png")
 
-    return NSImage(contentsOf: referenceURL)
+    return NSImage(contentsOf: referenceURL).map(divineYellow)
+}
+
+private typealias GlyphRGB = (red: CGFloat, green: CGFloat, blue: CGFloat)
+
+private func mixed(_ from: GlyphRGB, _ to: GlyphRGB, _ amount: CGFloat) -> GlyphRGB {
+    (
+        from.red + ((to.red - from.red) * amount),
+        from.green + ((to.green - from.green) * amount),
+        from.blue + ((to.blue - from.blue) * amount)
+    )
+}
+
+/// The reference artwork is three flat grays: a fog halo, the pointer fill and its light
+/// outline. Each pixel is unmixed by gray level and repainted: the fill becomes polished yellow
+/// metal (a diagonal ramp with one specular band), the outline a bright rim, and the fog a
+/// tight yellow aura that brightens toward the pointer. Rendered once at load, not per frame.
+private func divineYellow(_ image: NSImage) -> NSImage {
+    guard let cgImage = (image.representations.first as? NSBitmapImageRep)?.cgImage,
+          let context = CGContext(
+              data: nil,
+              width: cgImage.width,
+              height: cgImage.height,
+              bitsPerComponent: 8,
+              bytesPerRow: 0,
+              space: CGColorSpaceCreateDeviceRGB(),
+              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          )
+    else {
+        return image
+    }
+
+    context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+    guard let data = context.data else {
+        return image
+    }
+
+    let pixels = data.bindMemory(to: UInt8.self, capacity: context.bytesPerRow * cgImage.height)
+    // Gray levels measured from the artwork; fogGray sits a touch above the fog so its noise drops out.
+    let fogGray: CGFloat = 0.40
+    let fillGray: CGFloat = 0.302
+    let strokeGray: CGFloat = 0.867
+
+    let rim: GlyphRGB = (1.0, 0.98, 0.72)
+    let glowOuter: GlyphRGB = (1.0, 0.85, 0.05)
+    let glowCore: GlyphRGB = (1.0, 0.93, 0.40)
+    // The fog's alpha peaks at fogPeak beside the pointer. Raising its normalized falloff to
+    // glowTightness pulls the halo in to a small aura hugging the pointer (1 = the fog's full size).
+    let fogPeak: CGFloat = 0.76
+    let glowTightness: CGFloat = 8
+    let glowStrength: CGFloat = 0.7
+    // Across the pointer, corner to corner: lit edge, yellow, specular band, yellow, shaded, yellow.
+    let metalStops: [(position: CGFloat, color: GlyphRGB)] = [
+        (0, (1.0, 0.88, 0.10)),
+        (0.22, (1.0, 0.84, 0.0)),
+        (0.42, (1.0, 0.97, 0.62)),
+        (0.55, (1.0, 0.86, 0.0)),
+        (0.8, (0.82, 0.62, 0.0)),
+        (1, (1.0, 0.80, 0.0)),
+    ]
+
+    // Only the pointer is opaque, so the opaque pixels bound it.
+    var minX = cgImage.width, maxX = 0, minY = cgImage.height, maxY = 0
+    for y in 0..<cgImage.height {
+        for x in 0..<cgImage.width where pixels[(y * context.bytesPerRow) + (x * 4) + 3] >= 250 {
+            minX = min(minX, x)
+            maxX = max(maxX, x)
+            minY = min(minY, y)
+            maxY = max(maxY, y)
+        }
+    }
+    guard minX <= maxX else {
+        return image
+    }
+
+    let pointerSpan = CGFloat(max(maxX - minX, 1) + max(maxY - minY, 1))
+
+    func metal(at position: CGFloat) -> GlyphRGB {
+        for (lower, upper) in zip(metalStops, metalStops.dropFirst()) where position <= upper.position {
+            return mixed(lower.color, upper.color, (position - lower.position) / (upper.position - lower.position))
+        }
+        return metalStops[metalStops.count - 1].color
+    }
+
+    for y in 0..<cgImage.height {
+        for x in 0..<cgImage.width {
+            let index = (y * context.bytesPerRow) + (x * 4)
+            let sourceAlpha = CGFloat(pixels[index + 3]) / 255
+            guard sourceAlpha > 0 else {
+                continue
+            }
+
+            let gray = CGFloat(pixels[index]) / 255 / sourceAlpha
+            let color: GlyphRGB
+            var alpha = sourceAlpha
+            if sourceAlpha >= 0.98 {
+                // Inside the pointer: metal, rim, or the antialiased seam between them.
+                let rimShare = max(0, min(1, (gray - fillGray) / (strokeGray - fillGray)))
+                let position = max(0, min(1, (CGFloat(x - minX) + CGFloat(y - minY)) / pointerSpan))
+                color = mixed(metal(at: position), rim, rimShare)
+            } else {
+                // Rim antialiased over fog: split the coverage, then lay the rim over the halo.
+                let rimShare = max(0, min(1, sourceAlpha * (gray - fogGray) / (strokeGray - fogGray)))
+                let fog = rimShare < 1 ? (sourceAlpha - rimShare) / (1 - rimShare) : 0
+                let glowAlpha = max(0, min(1, pow(fog / fogPeak, glowTightness) * fogPeak * glowStrength))
+                let glow = mixed(glowOuter, glowCore, glowAlpha * glowAlpha)
+                let glowShare = glowAlpha * (1 - rimShare)
+
+                alpha = rimShare + glowShare
+                guard alpha > 0 else {
+                    (pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]) = (0, 0, 0, 0)
+                    continue
+                }
+                color = (
+                    ((rim.red * rimShare) + (glow.red * glowShare)) / alpha,
+                    ((rim.green * rimShare) + (glow.green * glowShare)) / alpha,
+                    ((rim.blue * rimShare) + (glow.blue * glowShare)) / alpha
+                )
+            }
+
+            pixels[index] = UInt8(color.red * alpha * 255)
+            pixels[index + 1] = UInt8(color.green * alpha * 255)
+            pixels[index + 2] = UInt8(color.blue * alpha * 255)
+            pixels[index + 3] = UInt8(alpha * 255)
+        }
+    }
+
+    guard let recolored = context.makeImage() else {
+        return image
+    }
+
+    // An explicit bitmap rep: `NSImage(cgImage:size:)` wraps a snapshot rep that reports 2x pixels on Retina.
+    let rep = NSBitmapImageRep(cgImage: recolored)
+    rep.size = image.size
+    let result = NSImage(size: image.size)
+    result.addRepresentation(rep)
+    return result
 }

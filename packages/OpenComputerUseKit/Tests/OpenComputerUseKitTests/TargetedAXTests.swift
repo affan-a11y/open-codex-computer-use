@@ -25,8 +25,27 @@ final class TargetedAXTests: XCTestCase {
         let c = criteria(text: "compose")
         XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: "Compose", description: nil, value: nil))
         XCTAssertTrue(targetedRecordMatches(c, role: "AXButton", title: nil, description: "Compose a message", value: nil))
-        XCTAssertTrue(targetedRecordMatches(c, role: "AXTextField", title: nil, description: nil, value: "re: compose"))
+        XCTAssertTrue(targetedRecordMatches(c, role: "AXStaticText", title: nil, description: nil, value: "re: compose"))
+        // what was typed into a field is not its name; its label and its hint are
+        XCTAssertFalse(targetedRecordMatches(c, role: "AXTextField", title: nil, description: nil, value: "re: compose"))
+        // asked for as a field, it is found by what it holds
+        XCTAssertTrue(targetedRecordMatches(criteria(text: "compose", role: "AXTextField"), role: "AXTextField", title: nil, description: nil, value: "re: compose"))
+        // the tree prints "search text field" off the subrole, so a role criteria may name it
+        XCTAssertTrue(targetedRecordMatches(criteria(role: "AXSearchField"), role: "AXTextField", title: nil, description: nil, value: nil, subrole: "AXSearchField"))
+        XCTAssertFalse(targetedRecordMatches(criteria(role: "AXSearchField"), role: "AXTextField", title: nil, description: nil, value: nil, subrole: nil))
+        XCTAssertTrue(targetedRecordMatches(c, role: "AXTextField", title: "Compose", description: nil, value: "anything"))
         XCTAssertFalse(targetedRecordMatches(c, role: "AXButton", title: "Send", description: nil, value: "hi"))
+        // the grey hint an empty field shows names it: the tree the model reads prints it
+        XCTAssertTrue(targetedRecordMatches(c, role: "AXTextField", title: "", description: nil, value: nil, placeholder: "Compose a note"))
+    }
+
+    func testABoxOfOneLetterTextsSpellsOneName() {
+        XCTAssertEqual(spellingSplitLetters(["R", "S", "I", "", "S", "t", "r", "a", "t"]), ["RSI Strat"])
+        XCTAssertEqual(spellingSplitLetters(["B", "o", "l", " ", "B"]), ["Bol B"])
+        // a row that also holds an author and a count keeps them as their own texts
+        XCTAssertEqual(spellingSplitLetters(["R", "S", "I", "", "C", "a", "n", "glaz", "26.3 K"]), ["RSI Can", "glaz", "26.3 K"])
+        XCTAssertEqual(spellingSplitLetters(["Total", "42"]), ["Total", "42"])   // ordinary texts are untouched
+        XCTAssertEqual(spellingSplitLetters(["", "Send", " "]), ["Send"])        // blanks outside a run are dropped
     }
 
     func testExactRequiresFullMatch() {

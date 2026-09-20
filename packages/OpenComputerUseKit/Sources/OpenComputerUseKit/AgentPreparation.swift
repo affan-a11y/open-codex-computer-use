@@ -58,7 +58,8 @@ enum AgentPreparation {
         // that appeared because the app was launched is left to the app.
         if opened, !before.contains(id) { AgentDisplay.shared.closeWhenRestored(id) }
         // Bounds changed when parked. Keep the action context in that display.
-        service.bindPreparedWindow(query: query, context: try SnapshotBuilder.resolveTargetWindow(for: app, windowID: id))
+        // A new window is focused before the app lists it; with the display off no park wait covers that.
+        service.bindPreparedWindow(query: query, context: try awaitWindow(app: app, windowID: id))
         return try json(["app": app.bundleIdentifier ?? app.name, "name": app.name, "window_id": id])
     }
 
@@ -81,10 +82,10 @@ enum AgentPreparation {
         }
     }
 
-    private static func awaitWindow(app: RunningAppDescriptor, excluding: CGWindowID? = nil) throws -> TargetedAX.WindowContext {
+    private static func awaitWindow(app: RunningAppDescriptor, excluding: CGWindowID? = nil, windowID: CGWindowID? = nil) throws -> TargetedAX.WindowContext {
         let deadline = Date().addingTimeInterval(3)
         repeat {
-            if let context = try? SnapshotBuilder.resolveTargetWindow(for: app),
+            if let context = try? SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID),
                let id = context.windowID, id != excluding { return context }
             Thread.sleep(forTimeInterval: 0.05)
         } while Date() < deadline

@@ -514,6 +514,9 @@ final class JavaScriptToolRuntime {
       _criteria: function (criteria) {
         var c = Object.assign({}, criteria || {});
         if (c.text && c.exact == null) { c.exact = true; }
+        // cua.within says where every criteria looks until it is set again; a criteria's own wins.
+        if (c.within === undefined && this.within) { c.within = this.within; }
+        if (!c.within) { delete c.within; }
         return c;
       },
       query: function () {
@@ -533,15 +536,18 @@ final class JavaScriptToolRuntime {
         if (opts.element_index != null || opts.x != null) { return opts; }
         if (opts.index != null) { return Object.assign({}, opts, { element_index: opts.index, index: undefined }); }
         if (!opts.text && !opts.role) { return opts; }
-        var criteria = { text: opts.text, role: opts.role, exact: opts.exact, limit: opts.limit, max_nodes: opts.max_nodes, window_id: opts.window_id };
+        var criteria = { text: opts.text, role: opts.role, exact: opts.exact, limit: opts.limit, max_nodes: opts.max_nodes, window_id: opts.window_id, within: opts.within };
         var found = this.waitFor(app, criteria, { timeout_ms: opts.timeout_ms != null ? opts.timeout_ms : 3000 });
         var visible = found.filter(function (e) { return e.bounds && e.bounds.w > 0 && e.bounds.h > 0; });
         var hit = null;
         if (prefer && !opts.role) { hit = visible.filter(function (e) { return prefer.test(e.role || ''); })[0] || null; }
+        // A press takes a field last: a search field holds the text typed into it, and the
+        // result it finds carries the same name.
+        if (!hit && prefer === this._pressable) { var field = this._editable; hit = visible.filter(function (e) { return !field.test(e.role || ''); })[0] || null; }
         if (!hit) { hit = visible[0] || null; }
         if (!hit) { throw new Error('no control matching ' + JSON.stringify(criteria) + ' in ' + app); }
         var rest = Object.assign({}, opts);
-        delete rest.text; delete rest.role; delete rest.exact; delete rest.limit; delete rest.max_nodes; delete rest.window_id; delete rest.timeout_ms;
+        delete rest.text; delete rest.role; delete rest.exact; delete rest.limit; delete rest.max_nodes; delete rest.window_id; delete rest.timeout_ms; delete rest.within;
         rest.element_index = hit.index;
         return rest;
       },
@@ -585,6 +591,9 @@ final class JavaScriptToolRuntime {
           __ocuSleep(250);
         }
       },
+      // Where criteria look: a container's criteria ({role: "AXWebArea"}, {role: "AXSheet"},
+      // {text: "Save as"}), or null for the whole window. Set once, like cua.app.
+      within: null,
       // Learned intents the host defined for this run: run("name", input) runs one.
       intents: {},
       run: function (name, input) {

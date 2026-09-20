@@ -387,6 +387,35 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(exacts, [true, false, nil, true, true])
     }
 
+    func testAPressTakesAFieldLast() {
+        var clicked: Int?; var set: Int?
+        let rt = runtime { tool, args in
+            switch tool {
+            case "query":
+                // a search field holding the typed name, then the result row of the same name
+                return .text(#"{"records":[{"index":1,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":2,"role":"AXGroup","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+            case "click": clicked = args["element_index"] as? Int ?? Int(args["element_index"] as? String ?? ""); return .text("ok")
+            case "set_value": set = args["element_index"] as? Int ?? Int(args["element_index"] as? String ?? ""); return .text("ok")
+            default: return .text("ok")
+            }
+        }
+        _ = rt.run(code: "cua.click('X', {text: 'Bollinger Bands'}); cua.setValue('X', {text: 'Bollinger Bands'}, 'a');", timeoutMs: 20000)
+        XCTAssertEqual(clicked, 2)
+        XCTAssertEqual(set, 1)
+    }
+
+    func testWithinSaysWhereEveryCriteriaLooksUntilSetAgain() {
+        var scopes: [String] = []
+        let rt = runtime { tool, args in
+            guard tool == "query" else { return .text("ok") }
+            let scope = args["within"] as? [String: Any]
+            scopes.append((scope?["role"] as? String) ?? (scope?["text"] as? String) ?? "window")
+            return .text(#"{"records":[{"index":1,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+        }
+        _ = rt.run(code: "cua.query('X', {text: 'Search'}); cua.within = {role: 'AXWebArea'}; cua.query('X', {text: 'Search'}); cua.setValue('X', {text: 'Search'}, 'a'); cua.click('X', {text: 'Save', within: {text: 'Save as'}}); cua.query('X', {text: 'Address', within: null}); cua.within = null; cua.waitFor('X', {text: 'Search'});", timeoutMs: 20000)
+        XCTAssertEqual(scopes, ["window", "AXWebArea", "AXWebArea", "Save as", "window", "window"])
+    }
+
     func testActionsPreferTheControlOverItsLabel() {
         var clicked: Int?; var set: Int?
         let rt = runtime { tool, args in

@@ -992,9 +992,11 @@ public final class ComputerUseService {
         exact: Bool = false,
         limit: Int = 20,
         maxNodes: Int = 500,
-        windowID: CGWindowID? = nil
+        windowID: CGWindowID? = nil,
+        withinText: String? = nil,
+        withinRole: String? = nil
     ) throws -> [[String: Any]] {
-        try probe(app: query, text: text, role: role, exact: exact, limit: limit, maxNodes: maxNodes, windowID: windowID).records
+        try probe(app: query, text: text, role: role, exact: exact, limit: limit, maxNodes: maxNodes, windowID: windowID, withinText: withinText, withinRole: withinRole).records
     }
 
     /// `query`, with the fingerprint of what the search saw: a caller polling for a
@@ -1008,7 +1010,9 @@ public final class ComputerUseService {
         exact: Bool = false,
         limit: Int = 20,
         maxNodes: Int = 500,
-        windowID: CGWindowID? = nil
+        windowID: CGWindowID? = nil,
+        withinText: String? = nil,
+        withinRole: String? = nil
     ) throws -> (records: [[String: Any]], digest: String?) {
         guard (text.map { !$0.isEmpty } ?? false) || (role.map { !$0.isEmpty } ?? false) else {
             throw ComputerUseError.invalidArguments("query requires at least one of text or role")
@@ -1017,7 +1021,8 @@ public final class ComputerUseService {
         // Read-only lookup: never steal foreground, even when the app has to launch.
         let app = try AppDiscovery.resolve(query, activate: false)
         let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: windowID ?? preparedWindows[query.lowercased()])
-        var criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes)
+        let within = withinText == nil && withinRole == nil ? nil : TargetedAX.Scope(text: withinText, role: withinRole)
+        var criteria = TargetedAX.Criteria(text: text, exact: exact, role: role, limit: limit, maxNodes: maxNodes, within: within)
         var result = SnapshotBuilder.targetedSearch(criteria, in: context)
         var forgiven = false
         if exact, result.records.isEmpty, !result.capped {

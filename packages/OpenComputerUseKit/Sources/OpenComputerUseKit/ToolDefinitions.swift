@@ -175,8 +175,12 @@ public enum ToolDefinitions {
                         "description": "Require a complete text match instead of a substring. Defaults to false.",
                     ],
                     "limit": positiveIntegerProperty(description: "Maximum matches to return. Defaults to 20."),
-                    "max_nodes": positiveIntegerProperty(description: "Node cap for the fallback traversal when the app has no native search. Defaults to 1500."),
+                    "max_nodes": positiveIntegerProperty(description: "Node cap for the fallback traversal when the app has no native search. Defaults to 5000."),
                     "window_id": numberProperty(description: "Search this specific window (CGWindowID) instead of the app's current window."),
+                    "within": [
+                        "type": "object",
+                        "description": "Search only inside the first container matching { text?, role? }: a sheet, a dialog, a page (role AXWebArea).",
+                    ],
                     "probe": [
                         "type": "boolean",
                         "description": "Return { records, digest }: the digest fingerprints what the search saw, so a poller can tell a settled screen from a changing one.",
@@ -249,7 +253,9 @@ native AX search and NO snapshot or screenshot, returning an `index` you pass to
 the ordinary actions. Under js, actions do not auto-capture state, so a burst \
 runs without a snapshot between steps; call getState/getAppState only when you \
 must read a result back.
-  cua.query(app, { text?, role?, exact?, limit?, max_nodes?, window_id? })
+  cua.query(app, { text?, role?, exact?, within?, limit?, max_nodes?, window_id? })
+    // within: { text?, role? } looks only inside that container (a sheet, a dialog, the page:
+    // role AXWebArea). cua.within = {...} sets it for every criteria; null is the whole window.
     -> [{ index, role, title, value, identifier, bounds, actions }]  // title falls back to the AX description
     // requires text and/or role; then e.g. cua.click(app, { element_index: r[0].index })
   cua.waitFor(app, criteria, { timeout_ms?, interval_ms? })

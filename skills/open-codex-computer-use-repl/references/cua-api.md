@@ -6,12 +6,43 @@ elsewhere for that one call. Actions throw an `Error` on a tool failure.
 
 ## Finding controls
 
+### `cua.within = { text?, role? } | null`
+Where every criteria looks until it is set again: inside the first container of the
+window that the scope names, and nowhere else. `null` (the start) is the whole
+window. A window has layers — the app's own controls, its content, a sheet or dialog
+on top — and a label alone cannot say which layer is meant: a browser's address
+field is "Address and search bar", so "the field named Search" is the browser's
+unless the page is named. Say where, as tightly as you know:
+
+```
+cua.within = { role: "AXWebArea" };      // the page, not the browser around it
+cua.within = { role: "AXSheet" };        // the sheet on top of a Mac window
+cua.within = { text: "Save as" };        // a dialog, a group or a table, by its own label
+cua.within = { role: "AXToolbar" };      // also AXOutline (a sidebar), AXTable, AXPopover, AXMenu
+cua.within = null;                       // the app's own controls again
+cua.click({ text: "OK", within: { role: "AXSheet" } });   // for one call; it wins over cua.within
+```
+
+- Set it at the top of every part: it outlives the turn, and a part run on its own
+  must not inherit another part's container.
+- When a click opens a sheet, a dialog, a popover or a picker, scope the lines that
+  work in it to it, and set the scope back when it closes.
+- A role alone takes the first such container; give its text too when a window has
+  several (two tables, several groups).
+- Inside a container a search is short and a miss is loud: `query` answers `[]` and
+  an action throws. The substring retry never leaves the container.
+- A container that is not on screen matches nothing: `waitFor` waits for it like for
+  any control.
+
 ### `cua.query(criteria) -> Element[]`
 Find controls through AX, with no snapshot or image. `criteria`: `text` (the
-whole label, case-insensitive; retried as a substring when nothing matches whole,
-such records carrying `match: "contains"`; `exact: false` asks for a substring),
-`role` (the `AX` prefix optional), `limit` (default 20), `max_nodes` (default
-1500), `window_id`. Supply text or role. Each element:
+whole label, case-insensitive: a title, a description, the grey hint an empty field
+shows, or a value — except what is typed into a field, which is its content and not
+its name; a box with no label of its own is named by the text it holds;
+retried as a substring when nothing matches whole, such records carrying
+`match: "contains"`; `exact: false` asks for a substring), `role` (the `AX` prefix
+optional), `within` (above), `limit` (default 20), `max_nodes` (default 5000),
+`window_id`. Supply text or role. Each element:
 
 ```
 {
@@ -44,14 +75,14 @@ Pause the program up to 10 s.
 
 ## Acting
 
-A control argument is criteria (`{ text, role, exact?, timeout_ms? }`), an element
+A control argument is criteria (`{ text, role, exact?, within?, timeout_ms? }`), an element
 from a query, or an index. Criteria are waited for (default 3000 ms); among the
 visible matches the action takes the control it can act on — `click` a button,
 link, row or menu item over a caption, `setValue` a field over its label — unless
 `role` says which; none there throws `no control matching …`.
 
 ### `cua.click({ text? | role? | element_index? | x?, y?, click_method? }) -> string`
-### `cua.type(text, { key_method? }) -> string` — into the focused element.
+### `cua.type(text, { key_method? }) -> string` — keys go wherever the keyboard focus is and add to what is there; to fill a field, `setValue` it by name.
 ### `cua.press(key)` / `cua.pressKey(key)` — xdotool syntax: `"Return"`, `"super+l"`.
 ### `cua.setValue(control, value) -> string` — preferred for editable fields; `""` clears.
 ### `cua.secondaryAction(control, action) -> string` — an action named in `actions`.

@@ -2060,6 +2060,17 @@ final class OpenComputerUseKitTests: XCTestCase {
 
         XCTAssertEqual(bitmap.pixelsWide, 252)
         XCTAssertEqual(bitmap.pixelsHigh, 252)
+
+        // The load repaints the gray artwork: the wide fog is pulled in to a tight yellow aura,
+        // and the pointer fill is opaque yellow.
+        let pixels = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        XCTAssertLessThan(try XCTUnwrap(pixels.colorAt(x: 100, y: 126)).alphaComponent, 0.1)
+        let aura = try XCTUnwrap(pixels.colorAt(x: 115, y: 126))
+        XCTAssertGreaterThan(aura.alphaComponent, 0.3)
+        XCTAssertGreaterThan(aura.redComponent, aura.blueComponent + 0.3)
+        let fill = try XCTUnwrap(pixels.colorAt(x: 124, y: 126))
+        XCTAssertEqual(fill.alphaComponent, 1, accuracy: 0.02)
+        XCTAssertGreaterThan(fill.redComponent, fill.blueComponent + 0.15)
     }
 
     func testSoftwareCursorGlyphArtworkNeutralHeadingMatchesCursorMotionBaseline() {

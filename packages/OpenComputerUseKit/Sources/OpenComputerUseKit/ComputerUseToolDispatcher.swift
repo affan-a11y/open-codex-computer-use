@@ -178,8 +178,10 @@ public final class ComputerUseToolDispatcher {
                 role: optionalString("role", in: arguments),
                 exact: (arguments["exact"] as? Bool) ?? false,
                 limit: try optionalPositiveInt("limit", in: arguments) ?? 20,
-                maxNodes: try optionalPositiveInt("max_nodes", in: arguments) ?? 1500,
-                windowID: optionalDouble("window_id", in: arguments).map { CGWindowID($0) }
+                maxNodes: try optionalPositiveInt("max_nodes", in: arguments) ?? 5000,
+                windowID: optionalDouble("window_id", in: arguments).map { CGWindowID($0) },
+                withinText: (arguments["within"] as? [String: Any])?["text"] as? String,
+                withinRole: (arguments["within"] as? [String: Any])?["role"] as? String
             )
             if (arguments["probe"] as? Bool) == true {
                 return jsonResult(["records": found.records, "digest": found.digest as Any? ?? NSNull()])

@@ -54,6 +54,9 @@ final class AgentDisplay: @unchecked Sendable {
     static let moveSettle: TimeInterval = 2.0
     // Fallback sleep for display creation when the Space SPI is unavailable.
     static let displayFallbackSettle: TimeInterval = 0.5
+    /// OPEN_COMPUTER_USE_AGENT_DISPLAY=off: no display is made and a prepared window is driven
+    /// where it sits, on the person's own screen.
+    static let off = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_AGENT_DISPLAY"] == "off"
 
     struct ParkedWindow {
         let pid: pid_t
@@ -111,6 +114,12 @@ final class AgentDisplay: @unchecked Sendable {
 
         guard let position = axPoint(window, kAXPositionAttribute as String) else {
             throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not read the window position")
+        }
+        if Self.off {
+            // Still recorded: restore closes a window the agent opened.
+            parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position)
+            installExitHookIfNeeded()
+            return bounds
         }
         let size = axSize(window) ?? CGSize(width: 800, height: 600)
         let target = agentDisplayPlacement(windowSize: size, displayBounds: bounds)
@@ -255,6 +264,7 @@ final class AgentDisplay: @unchecked Sendable {
     // MARK: - Display lifecycle (call with lock held)
 
     private func ensureDisplay() throws -> CGRect {
+        if Self.off { return CGDisplayBounds(CGMainDisplayID()) }
         if displayID != 0, let bounds = displayBounds, !bounds.isEmpty {
             return bounds
         }
