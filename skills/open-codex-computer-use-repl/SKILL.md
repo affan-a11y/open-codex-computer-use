@@ -51,6 +51,47 @@ when the action has run. Print with `write(value)`; return values are not shown.
    }
    ```
 
+## Say where: scope
+
+A window has layers: the app's own controls (a toolbar, a sidebar, a browser's
+address field and tabs), the content inside them (a document, a page, a table), and
+whatever is on top (a sheet, a dialog, a popover, a menu). The same label lives in
+more than one layer — every browser has a "search" field of its own above a page
+that has one too — and criteria name a label and a role, not a place. Name the
+place, and name it as tightly as you know it:
+
+```js
+cua.app = "com.google.Chrome";
+cua.within = null;                                   // the browser's own controls
+cua.setValue({ role: "AXTextField", text: "Address and search bar" }, url);
+cua.press("Return");
+cua.within = { role: "AXWebArea" };                  // from here on: the page
+cua.click({ text: "Indicators" });                   // a dialog opens in the page
+cua.within = { text: "Indicators, metrics, and strategies" };   // from here on: that dialog
+cua.setValue({ role: "AXTextField", text: "Search" }, "RSI");
+cua.click({ text: "Relative Strength Index" });
+cua.press("Escape");
+cua.within = { role: "AXWebArea" };                  // the dialog is gone: back to the page
+```
+
+- The tightest container you can name wins: the dialog by its title once you have
+  seen it, the sheet by its role, the page when you know nothing else, the whole
+  window (`null`) only for the app's own controls.
+- Start every part by setting `cua.within`. It persists across calls and turns, so
+  a part that assumes the last one's container acts in the wrong place.
+- A click that opens a container is followed by lines scoped to it; when it closes,
+  set the scope back. `{ ..., within: {...} }` on one criteria scopes one call.
+- A scope is matched by the container's own label or role. A role alone is the
+  first such container: fine for a page, a sheet, a toolbar; add the text when the
+  window holds several tables or groups.
+- Scoping is also the fast path and the honest one: the search walks the container
+  instead of the window, and a label that is not in it fails loudly instead of
+  landing on a look-alike somewhere else.
+
+Native apps work the same way: `{ role: "AXSheet" }` for a save sheet,
+`{ role: "AXOutline" }` for a sidebar, `{ role: "AXToolbar" }`, `{ role: "AXTable" }`,
+`{ role: "AXPopover" }`, or any group or dialog by its title.
+
 ## Output, persistence, timeouts
 
 - `write(value)` appends to the result (objects are JSON-stringified);

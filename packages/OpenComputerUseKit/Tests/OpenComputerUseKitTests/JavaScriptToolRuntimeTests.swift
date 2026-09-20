@@ -327,6 +327,139 @@ final class JavaScriptToolRuntimeTests: XCTestCase {
         XCTAssertEqual(ranges.last?.1, source.utf8.count - 1)
     }
 
+    func testWaitForGivesUpOnceTheScreenHasSettledWithoutTheControl() {
+        var polls = 0
+        let rt = runtime { tool, args in
+            XCTAssertEqual(tool, "query")
+            XCTAssertEqual(args["probe"] as? Bool, true)
+            polls += 1
+            return .text(#"{"records":[],"digest":"same screen"}"#)
+        }
+        let start = Date()
+        let result = rt.run(code: "write(JSON.stringify(cua.waitFor('X', {text: 'Send'}, {timeout_ms: 8000})));", timeoutMs: 20000)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(result.primaryText, "[]")
+        XCTAssertLessThan(elapsed, 3)  // not the 8 s asked for
+        XCTAssertGreaterThan(polls, 3)
+    }
+
+    func testWaitForKeepsPollingWhileTheScreenChanges() {
+        var polls = 0
+        let rt = runtime { _, _ in
+            polls += 1
+            return .text(polls < 12 ? #"{"records":[],"digest":"\#(polls)"}"# : #"{"records":[{"index":7}],"digest":"x"}"#)
+        }
+        let result = rt.run(code: "write(cua.waitFor('X', {text: 'Send'}, {timeout_ms: 8000, interval_ms: 20})[0].index);", timeoutMs: 20000)
+        XCTAssertEqual(result.primaryText, "7")
+    }
+
+    func testCallsActInCuaAppWhenNoAppIsNamed() {
+        var seen: [(String, [String: Any])] = []
+        let rt = runtime { tool, args in
+            seen.append((tool, args))
+            return tool == "query" ? .text(#"{"records":[{"index":4,"bounds":{"x":1,"y":2,"w":3,"h":4}}],"digest":"d"}"#) : .text("ok")
+        }
+        let result = rt.run(code: """
+            cua.app = "com.apple.Notes";
+            cua.type("hi");
+            cua.press("Return");
+            cua.setValue(9, "");
+            cua.click({text: "Send"});
+            cua.type("com.apple.Safari", "elsewhere");
+            """, timeoutMs: 20000)
+        XCTAssertFalse(result.isError, result.primaryText ?? "")
+        let apps = seen.map { ($0.1["app"] as? String) ?? "-" }
+        XCTAssertEqual(seen.map(\.0), ["type_text", "press_key", "set_value", "query", "click", "type_text"])
+        XCTAssertEqual(apps, ["com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Notes", "com.apple.Safari"])
+        XCTAssertEqual(seen[4].1["element_index"] as? Int, 4)  // click by criteria resolved the control
+        XCTAssertNil(seen[4].1["text"])
+        XCTAssertEqual(seen[2].1["element_index"] as? Int, 9)
+    }
+
+    func testTextCriteriaNameTheWholeLabelUnlessSaidOtherwise() {
+        var exacts: [Bool?] = []
+        let rt = runtime { tool, args in
+            guard tool == "query" else { return .text("ok") }
+            exacts.append(args["exact"] as? Bool)
+            return .text(#"{"records":[{"index":1,"bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+        }
+        _ = rt.run(code: "cua.query('X', {text: 'To'}); cua.query('X', {text: 'To', exact: false}); cua.waitFor('X', {role: 'AXButton'}); cua.any('X', [{text: 'a'}]); cua.click('X', {text: 'b'});", timeoutMs: 20000)
+        XCTAssertEqual(exacts, [true, false, nil, true, true])
+    }
+
+    func testAPressTakesAFieldLast() {
+        var clicked: Int?; var set: Int?
+        let rt = runtime { tool, args in
+            switch tool {
+            case "query":
+                // a search field holding the typed name, then the result row of the same name
+                return .text(#"{"records":[{"index":1,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":2,"role":"AXGroup","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+            case "click": clicked = args["element_index"] as? Int ?? Int(args["element_index"] as? String ?? ""); return .text("ok")
+            case "set_value": set = args["element_index"] as? Int ?? Int(args["element_index"] as? String ?? ""); return .text("ok")
+            default: return .text("ok")
+            }
+        }
+        _ = rt.run(code: "cua.click('X', {text: 'Bollinger Bands'}); cua.setValue('X', {text: 'Bollinger Bands'}, 'a');", timeoutMs: 20000)
+        XCTAssertEqual(clicked, 2)
+        XCTAssertEqual(set, 1)
+    }
+
+    func testWithinSaysWhereEveryCriteriaLooksUntilSetAgain() {
+        var scopes: [String] = []
+        let rt = runtime { tool, args in
+            guard tool == "query" else { return .text("ok") }
+            let scope = args["within"] as? [String: Any]
+            scopes.append((scope?["role"] as? String) ?? (scope?["text"] as? String) ?? "window")
+            return .text(#"{"records":[{"index":1,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+        }
+        _ = rt.run(code: "cua.query('X', {text: 'Search'}); cua.within = {role: 'AXWebArea'}; cua.query('X', {text: 'Search'}); cua.setValue('X', {text: 'Search'}, 'a'); cua.click('X', {text: 'Save', within: {text: 'Save as'}}); cua.query('X', {text: 'Address', within: null}); cua.within = null; cua.waitFor('X', {text: 'Search'});", timeoutMs: 20000)
+        XCTAssertEqual(scopes, ["window", "AXWebArea", "AXWebArea", "Save as", "window", "window"])
+    }
+
+    func testActionsPreferTheControlOverItsLabel() {
+        var clicked: Int?; var set: Int?
+        let rt = runtime { tool, args in
+            switch tool {
+            case "query":
+                return .text(#"{"records":[{"index":1,"role":"AXStaticText","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":2,"role":"AXTextField","bounds":{"x":0,"y":0,"w":1,"h":1}},{"index":3,"role":"AXButton","bounds":{"x":0,"y":0,"w":1,"h":1}}],"digest":"d"}"#)
+            case "click": clicked = args["element_index"] as? Int
+            case "set_value": set = args["element_index"] as? Int
+            default: break
+            }
+            return .text("ok")
+        }
+        let result = rt.run(code: "cua.click('X', {text: 'To'}); cua.setValue('X', {text: 'To'}, 'x');", timeoutMs: 20000)
+        XCTAssertFalse(result.isError, result.primaryText ?? "")
+        XCTAssertEqual(clicked, 3)  // the button, not the caption
+        XCTAssertEqual(set, 2)      // the field, not its label
+    }
+
+    func testClickByCriteriaFailsPlainlyWhenNothingMatches() {
+        let rt = runtime { tool, _ in
+            tool == "query" ? .text(#"{"records":[],"digest":"same"}"#) : .text("ok")
+        }
+        let result = rt.run(code: "cua.click('X', {text: 'Send'});", timeoutMs: 20000)
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.primaryText?.contains("no control matching") == true)
+    }
+
+    func testAnyReturnsTheFirstCandidatePresent() {
+        let rt = runtime { tool, args in
+            XCTAssertEqual(tool, "query")
+            let text = args["text"] as? String ?? ""
+            return .text(text == "New message" ? #"{"records":[{"index":7}],"digest":"d"}"# : #"{"records":[],"digest":"d"}"#)
+        }
+        let result = rt.run(code: "var r = cua.any('X', [{text: 'Compose'}, {text: 'New message'}]); write(r[0].index + ':' + r[0].which);", timeoutMs: 20000)
+        XCTAssertEqual(result.primaryText, "7:1")
+    }
+
+    func testRunCallsALearnedIntentByName() {
+        let rt = runtime()
+        _ = rt.run(code: "cua.intents['open_channel'] = (function () { function run(input) { write('opened ' + input.channel); return 1; } return run; })();", timeoutMs: 5000)
+        XCTAssertEqual(rt.run(code: "cua.run('open_channel', {channel: 'general'});", timeoutMs: 5000).primaryText, "opened general")
+        XCTAssertTrue(rt.run(code: "cua.run('nope');", timeoutMs: 5000).isError)
+    }
+
     func testStreamSemicolonClosesCompoundStatementPromptly() {
         let rt = runtime()
         rt.beginStream(id: "c1")

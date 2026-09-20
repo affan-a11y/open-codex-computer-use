@@ -994,8 +994,22 @@ private struct TreeRenderer {
             return
         }
 
-        for child in childElements {
-            render(child, depth: depth + 1, ancestors: nextAncestors, webAreaDistance: childWebAreaDistance)
+        // A run of one-letter texts is one text, printed on one line and standing for this
+        // node: a group that also holds a link (a result with its author) is never summarized
+        // above, and its name would otherwise reach the model as thirty lines of letters.
+        var at = 0
+        while at < childElements.count {
+            var run: [String] = []
+            while at + run.count < childElements.count, let letter = splitLetter(of: childElements[at + run.count]) {
+                run.append(letter)
+            }
+            if run.count >= 2, let word = spellingSplitLetters(run).first, word.count >= 2 {
+                renderSyntheticText(sanitizeText(word, textLimit: context.textLimit), representedBy: root, depth: depth + 1)
+                at += run.count
+            } else {
+                render(childElements[at], depth: depth + 1, ancestors: nextAncestors, webAreaDistance: childWebAreaDistance)
+                at += 1
+            }
         }
     }
 
@@ -1834,8 +1848,18 @@ private func summarizedGenericText(
         return nil
     }
 
-    let texts = descendantTextsForSummary(of: element, textLimit: textLimit)
-    guard texts.count >= minimumTextCount else {
+    // A page that bolds the letters typed draws one name as a run of one-letter texts, a
+    // blank one between words. The search names the box by what it holds; the tree prints the
+    // same name on one line, so the model asks for what the search accepts.
+    let pieces = childElements.flatMap { child -> [String] in
+        if let letter = splitLetter(of: child) {
+            return [letter]
+        }
+        return descendantTextsForSummary(of: child, depth: 1, textLimit: textLimit)
+    }
+    let texts = spellingSplitLetters(pieces)
+    let spelled = texts.count < pieces.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+    guard texts.count >= minimumTextCount || spelled else {
         return nil
     }
 
@@ -1880,6 +1904,31 @@ private func summaryImageDescendants(of element: AXUIElement, depth: Int = 0) ->
 
 func shouldRenderGenericTextSummaryAsChildren(_ genericTextSummary: String?, summaryImageCount: Int) -> Bool {
     genericTextSummary != nil && summaryImageCount > 0
+}
+
+/// One letter of a name a page draws letter by letter, or the blank between two of its words
+/// (a static text holding one character, or none); nil for anything else.
+private func splitLetter(of element: AXUIElement) -> String? {
+    guard stringValue(of: element, attribute: kAXRoleAttribute) == (kAXStaticTextRole as String) else { return nil }
+    let value = stringValue(of: element, attribute: kAXValueAttribute) ?? ""
+    return value.count <= 1 ? value : nil
+}
+
+/// The texts a group holds, with each run of one-letter pieces spelled as the words it
+/// draws: a blank piece inside a run is the space between two words. Other pieces stay as
+/// they are, blanks outside a run are dropped, and a lone letter stays a lone letter.
+func spellingSplitLetters(_ pieces: [String]) -> [String] {
+    var texts: [String] = [], run = ""
+    func close() {
+        let words = run.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if !words.isEmpty { texts.append(words) }
+        run = ""
+    }
+    for piece in pieces {
+        if piece.count <= 1 { run += piece.isEmpty ? " " : piece } else { close(); texts.append(piece) }
+    }
+    close()
+    return texts
 }
 
 func shouldMergeTextOnlySiblings(_ texts: [String]) -> Bool {
@@ -2360,6 +2409,15 @@ enum TargetedAX {
         var role: String?
         var limit: Int
         var maxNodes: Int
+        /// The container the control is in: a sheet, a dialog, a page. Nil is the whole window.
+        var within: Scope? = nil
+    }
+
+    /// Where a search looks: the first node of the window this names, and nothing outside it.
+    /// "The Save in the sheet", "the field in the page": a label alone cannot say which.
+    struct Scope {
+        var text: String?
+        var role: String?
     }
 
     struct WindowContext {
@@ -2377,6 +2435,10 @@ enum TargetedAX {
         /// True when the bounded traversal hit its node cap before exhausting the
         /// window subtree, so absence of a match is not conclusive.
         let capped: Bool
+        /// A fingerprint of what the traversal saw (role, title, value of every visited
+        /// node), so a caller polling for a control can tell a screen that has settled
+        /// without it from one still changing. Nil on the native search path.
+        var digest: String? = nil
     }
 }
 
@@ -2402,6 +2464,12 @@ extension SnapshotBuilder {
         let rootWindow: AXUIElement
         if let windowID, let named = windowElement(for: windowID, appElement: appElement) {
             rootWindow = named
+        } else if let windowID, let replacement = windowOnAgentDisplay(appElement: appElement) {
+            // The prepared window is gone (a page change can replace it). Another window of
+            // the app on the agent display is what the program meant; the person's own
+            // windows are never substituted.
+            TimingLog.note("window_id \(windowID) is gone; using the app's window on the agent display")
+            rootWindow = replacement
         } else if let windowID {
             throw ComputerUseError.stateUnavailable("window_id \(windowID) is not a current window of \(app.bundleIdentifier ?? app.name).")
         } else if let focused = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
@@ -2446,6 +2514,17 @@ extension SnapshotBuilder {
         return (context, fresh)
     }
 
+    /// The app's first window that sits on one of the agent display's Spaces.
+    private static func windowOnAgentDisplay(appElement: AXUIElement) -> AXUIElement? {
+        let spaces = AgentDisplay.shared.displaySpaceIDs
+        guard !spaces.isEmpty else { return nil }
+        let spi = SkyLightSPI.shared
+        return copyArray(appElement, attribute: kAXWindowsAttribute)?.first { window in
+            guard let id = spi.windowID(for: window), let on = spi.spaces(forWindow: id) else { return false }
+            return !spaces.isDisjoint(with: on)
+        }
+    }
+
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
         copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
             SkyLightSPI.shared.windowID(for: $0) == windowID
@@ -2463,6 +2542,8 @@ extension SnapshotBuilder {
         kAXIdentifierAttribute as String,
         kAXPositionAttribute as String,
         kAXSizeAttribute as String,
+        "AXPlaceholderValue",
+        kAXSubroleAttribute as String,
     ]
 
     /// Find controls in the target window matching `criteria`. Tries the app's
@@ -2474,19 +2555,33 @@ extension SnapshotBuilder {
     /// them without any snapshot.
     static func targetedSearch(_ criteria: TargetedAX.Criteria, in context: TargetedAX.WindowContext) -> TargetedAX.SearchResult {
         let limit = max(1, min(criteria.limit, 100))
-        let windowElement = context.windowElement
+        var windowElement = context.windowElement
+        if let scope = criteria.within {
+            let found = container(scope, in: windowElement, budget: max(1, criteria.maxNodes))
+            guard let element = found.element else {
+                return TargetedAX.SearchResult(records: [], capped: found.capped, digest: found.digest)
+            }
+            windowElement = element
+        }
 
         // Native optimized search, when the app offers it: results are already the
-        // matching set, so just build records (still stop at `limit`).
-        if let native = predicateSearch(root: windowElement, searchText: criteria.text, resultsLimit: limit * 4) {
+        // matching set, so just build records (still stop at `limit`). A miss falls
+        // through to the walk below: a poller needs its digest to know the screen has
+        // settled, and the walk matches labels the native search skipped. A text criteria goes
+        // to the walk: the native search knows a node's own label only, so with a name typed
+        // into a search field it answers that field and never the result row the walk would
+        // name by what it holds.
+        if criteria.text == nil, let native = predicateSearch(root: windowElement, searchText: criteria.text, resultsLimit: limit * 4) {
             var records: [ElementRecord] = []
             for element in native {
                 let scan = batchScan(element)
-                guard targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) else { continue }
+                guard targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value, placeholder: scan.placeholder, subrole: scan.subrole) else { continue }
                 records.append(makeRecord(element, scan: scan, windowBounds: context.windowBounds))
                 if records.count >= limit { break }
             }
-            return TargetedAX.SearchResult(records: records, capped: false)
+            if !records.isEmpty {
+                return TargetedAX.SearchResult(records: records, capped: false)
+            }
         }
 
         // Bounded BFS with interleaved matching and early stop. Off-screen
@@ -2495,38 +2590,108 @@ extension SnapshotBuilder {
         // The clip rect is the root window's OWN AX frame, captured in this same
         // pass — so it can never skew against the node frames the way a separately
         // read CGWindow bounds can when the window moves.
+        // The walk inside a container has the whole budget: finding the container is not its cost.
         let budget = max(1, criteria.maxNodes)
         let windowBounds = context.windowBounds
         var clip: CGRect?
         var records: [ElementRecord] = []
-        var queue: [AXUIElement] = [windowElement]
+        var queue: [(element: AXUIElement, parent: Int)] = [(windowElement, -1)]
+        var seen: [Seen] = []
         var head = 0
         var visited = 0
         var capped = false
+        var digest = Hasher()
         while head < queue.count {
             if visited >= budget { capped = true; break }
-            let element = queue[head]
+            let (element, parent) = queue[head]
             head += 1
             visited += 1
 
             let scan = batchScan(element)
+            digest.combine(scan.role); digest.combine(scan.title); digest.combine(scan.value)
 
             if visited == 1 {
-                // The window itself is the clip; never prune it.
-                clip = scan.globalFrame
+                // The root itself is the clip; never prune it. A container with no frame clips nothing.
+                clip = scan.globalFrame.flatMap { $0.isEmpty ? nil : $0 }
             } else if let clip, let frame = scan.globalFrame, !frame.isEmpty, !frame.intersects(clip) {
                 // Off-window subtree. Unknown or 0×0 frame (web wrapper groups) → keep.
                 continue
             }
 
-            if targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value) {
+            if targetedRecordMatches(criteria, role: scan.role, title: scan.title, description: scan.description, value: scan.value, placeholder: scan.placeholder, subrole: scan.subrole) {
                 records.append(makeRecord(element, scan: scan, windowBounds: windowBounds))
                 if records.count >= limit { capped = false; break }
             }
 
+            seen.append(Seen(element: element, scan: scan, parent: parent))
+            queue.append(contentsOf: searchChildren(of: element, role: scan.role).map { ($0, seen.count - 1) })
+        }
+        for (at, text) in namedByContent(criteria, seen).prefix(limit - records.count) {
+            records.append(makeRecord(seen[at].element, scan: seen[at].scan, windowBounds: windowBounds, title: text))
+        }
+        return TargetedAX.SearchResult(records: records, capped: capped, digest: String(digest.finalize()))
+    }
+
+    private struct Seen {
+        let element: AXUIElement
+        let scan: NodeScan
+        let parent: Int
+    }
+
+    /// A node with no label of its own is named by the text it holds, as a person reads it:
+    /// a page draws one result as a nameless box of one-letter texts ("R", "e", "l"…) to
+    /// bold the letters typed, and then no node carries the name the picture shows. Returns
+    /// the smallest such nodes whose text matches, with that text. `seen` is in walk order:
+    /// a node's children come after it and siblings keep their order.
+    private static func namedByContent(_ criteria: TargetedAX.Criteria, _ seen: [Seen]) -> [(Int, String)] {
+        guard let wanted = criteria.text.map(squashed), !wanted.isEmpty else { return [] }
+        var children = [[Int]](repeating: [], count: seen.count)
+        for (at, node) in seen.enumerated() where node.parent >= 0 { children[node.parent].append(at) }
+        var text = [String](repeating: "", count: seen.count)
+        var covered = [Bool](repeating: false, count: seen.count)
+        var hits: [(Int, String)] = []
+        for at in seen.indices.reversed() {
+            let scan = seen[at].scan
+            let own = [scan.title, scan.description, targetedValueNames(scan.role) ? scan.value : nil, scan.placeholder].compactMap { $0 }.first { !$0.isEmpty }
+            text[at] = own ?? children[at].map { text[$0] }.joined()
+            let read = squashed(text[at])
+            let matches = (criteria.exact ? read == wanted : read.contains(wanted))
+                && (criteria.role.map { targetedRoleEquals(scan.role, $0) || targetedRoleEquals(scan.subrole, $0) } ?? true)
+            let below = children[at].contains { covered[$0] }
+            if matches, !below, own == nil { hits.append((at, text[at])) }
+            covered[at] = matches || below
+        }
+        return hits.reversed()
+    }
+
+    /// Text as compared: no case, no white space (a page splits a name anywhere).
+    private static func squashed(_ text: String) -> String {
+        text.lowercased().filter { !$0.isWhitespace }
+    }
+
+    /// The container a scope names: the first node, in walk order, whose whole label is the
+    /// scope's text (a node holding the text as a part, when none has it whole) and whose role
+    /// is the scope's. The digest lets a poller see a window settle without the container.
+    private static func container(_ scope: TargetedAX.Scope, in window: AXUIElement, budget: Int)
+        -> (element: AXUIElement?, visited: Int, capped: Bool, digest: String) {
+        var whole = TargetedAX.Criteria(text: scope.text, exact: true, role: scope.role, limit: 1, maxNodes: budget)
+        var queue = [window], head = 0, loose: AXUIElement?, digest = Hasher()
+        while head < queue.count, head < budget {
+            let element = queue[head]
+            head += 1
+            let scan = batchScan(element)
+            digest.combine(scan.role); digest.combine(scan.title); digest.combine(scan.value)
+            whole.exact = true
+            if targetedRecordMatches(whole, role: scan.role, title: scan.title, description: scan.description, value: scan.value, placeholder: scan.placeholder, subrole: scan.subrole) {
+                return (element, head, false, String(digest.finalize()))
+            }
+            whole.exact = false
+            if loose == nil, targetedRecordMatches(whole, role: scan.role, title: scan.title, description: scan.description, value: scan.value, placeholder: scan.placeholder, subrole: scan.subrole) {
+                loose = element
+            }
             queue.append(contentsOf: searchChildren(of: element, role: scan.role))
         }
-        return TargetedAX.SearchResult(records: records, capped: capped)
+        return (loose, head, loose == nil && head < queue.count, String(digest.finalize()))
     }
 
     // Roles whose children are a potentially huge row set (file lists, tables,
@@ -2552,6 +2717,11 @@ extension SnapshotBuilder {
         let value: String?
         let identifier: String?
         let globalFrame: CGRect?
+        /// The grey text an empty field shows. The tree the model reads prints it
+        /// ("Placeholder: Search"), so a search by that name has to find the field.
+        let placeholder: String?
+        /// The tree prints "search text field" off this, so a role criteria may name it.
+        let subrole: String?
     }
 
     private static func batchScan(_ element: AXUIElement) -> NodeScan {
@@ -2559,7 +2729,9 @@ extension SnapshotBuilder {
         func str(_ i: Int) -> String? { raw[i] as? String }
         return NodeScan(
             role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),
-            globalFrame: axFrame(position: raw[5], size: raw[6])
+            globalFrame: axFrame(position: raw[5], size: raw[6]),
+            placeholder: str(7),
+            subrole: str(8)
         )
     }
 
@@ -2578,7 +2750,7 @@ extension SnapshotBuilder {
         return CGRect(origin: point, size: extent)
     }
 
-    private static func makeRecord(_ element: AXUIElement, scan: NodeScan, windowBounds: CGRect?) -> ElementRecord {
+    private static func makeRecord(_ element: AXUIElement, scan: NodeScan, windowBounds: CGRect?, title: String? = nil) -> ElementRecord {
         let rawActions = copyActions(element) ?? []
         // Reuse the frame from the batched scan; window-relative when we have bounds.
         let localFrame: CGRect?
@@ -2593,7 +2765,7 @@ extension SnapshotBuilder {
             element: element,
             localFrame: localFrame,
             role: scan.role,
-            title: scan.title ?? scan.description,
+            title: title ?? [scan.title, scan.description, scan.placeholder].compactMap { $0 }.first { !$0.isEmpty },
             value: scan.value.map { $0.count > defaultTextLimit ? String($0.prefix(defaultTextLimit)) : $0 },
             rawActions: rawActions,
             prettyActions: scan.role.map { meaningfulActions(rawActions, role: $0) } ?? rawActions
@@ -2636,13 +2808,18 @@ func targetedRecordMatches(
     role: String?,
     title: String?,
     description: String?,
-    value: String?
+    value: String?,
+    placeholder: String? = nil,
+    subrole: String? = nil
 ) -> Bool {
-    if let wantedRole = criteria.role, !targetedRoleEquals(role, wantedRole) {
+    if let wantedRole = criteria.role, !targetedRoleEquals(role, wantedRole), !targetedRoleEquals(subrole, wantedRole) {
         return false
     }
     if let wantedText = criteria.text, !wantedText.isEmpty {
-        let fields = [title, description, value]
+        // {text: name} names a thing, and a field holding the name is not it; {role: a field,
+        // text: what was typed} asks for the field by its content, and finds it.
+        let askedForField = criteria.role.map { !targetedValueNames($0) } ?? false
+        let fields = [title, description, (targetedValueNames(role) || askedForField) ? value : nil, placeholder]
         let hit = fields.contains { field in
             guard let field else { return false }
             if criteria.exact {
@@ -2653,6 +2830,14 @@ func targetedRecordMatches(
         if !hit { return false }
     }
     return true
+}
+
+/// What a person typed into a field is not the field's name. A search field holding
+/// "Bollinger Bands" is not the Bollinger Bands row: a wait for the row must not pass on the
+/// field the moment the name is typed, before the results arrive. A field is found by its
+/// label or its hint text; a static text's value is what it shows, so it names it.
+func targetedValueNames(_ role: String?) -> Bool {
+    !["textfield", "textarea", "combobox", "searchfield"].contains { targetedRoleEquals(role, $0) }
 }
 
 /// Role match tolerant of the `AX` prefix ("button" matches "AXButton").
