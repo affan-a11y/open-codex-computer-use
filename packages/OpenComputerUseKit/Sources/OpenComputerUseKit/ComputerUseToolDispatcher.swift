@@ -57,6 +57,12 @@ public final class ComputerUseToolDispatcher {
         },
         elementsProvider: { [unowned self] app in
             try self.service.structuredElements(app: app)
+        },
+        windowText: { [unowned self] app in
+            try self.service.windowText(app: app)
+        },
+        controls: { [unowned self] app in
+            try self.service.controls(app: app)
         }
     )
     #endif

@@ -16,9 +16,13 @@ import OpenComputerUseJavaScriptShim
 final class JavaScriptToolRuntime {
     typealias ToolCaller = (String, [String: Any]) throws -> ToolCallResult
     typealias ElementsProvider = (String) throws -> [[String: Any]]
+    /// Every control of an app's window a person could act on now, as query records.
+    typealias Controls = (_ app: String) throws -> [[String: Any]]
 
     private let toolCaller: ToolCaller
     private let elementsProvider: ElementsProvider
+    private let validation: JevValidation
+    private let controls: Controls
     private var context: JSContext
     private var output = ""
     private var images: [Data] = []
@@ -61,10 +65,14 @@ final class JavaScriptToolRuntime {
 
     init(
         toolCaller: @escaping ToolCaller,
-        elementsProvider: @escaping ElementsProvider = { _ in [] }
+        elementsProvider: @escaping ElementsProvider = { _ in [] },
+        windowText: @escaping JevValidation.WindowText = { _ in "" },
+        controls: @escaping Controls = { _ in [] }
     ) {
         self.toolCaller = toolCaller
         self.elementsProvider = elementsProvider
+        self.validation = JevValidation(windowText: windowText)
+        self.controls = controls
         self.context = JSContext()
         configure(context)
     }
@@ -170,6 +178,11 @@ final class JavaScriptToolRuntime {
                 cell.finished = true
                 executeNewlyComplete(cell, isFinal: true)
             }
+        }
+        // The program is written: the validations still out are waited for here, once.
+        if !cell.failed, let failure = validation.failure(patient: true) {
+            cell.failed = true
+            cell.error = failure
         }
         return cellResult(cell)
     }
@@ -336,6 +349,25 @@ final class JavaScriptToolRuntime {
         }
         ctx.setObject(elementsBlock, forKeyedSubscript: "__ocuElements" as NSString)
 
+        let validateBlock: @convention(block) (String, String) -> Void = { [unowned self] app, fact in
+            self.validation.validate(app: app, fact: fact)
+        }
+        ctx.setObject(validateBlock, forKeyedSubscript: "__ocuValidate" as NSString)
+
+        let controlsBlock: @convention(block) (String) -> String = { [unowned self] app in
+            do {
+                return Self.jsonString(["controls": try self.controls(app)])
+            } catch {
+                return Self.jsonString(["error": String(describing: error)])
+            }
+        }
+        ctx.setObject(controlsBlock, forKeyedSubscript: "__ocuControls" as NSString)
+
+        let validationFailureBlock: @convention(block) () -> String = { [unowned self] in
+            self.validation.failure(patient: false) ?? ""
+        }
+        ctx.setObject(validationFailureBlock, forKeyedSubscript: "__ocuValidationFailure" as NSString)
+
         // A pause inside a statement, for cua.waitFor: the UI needs a beat after a
         // key press or click before its new controls exist. Capped well under the
         // 30 s a streamed statement may run.
@@ -440,6 +472,9 @@ final class JavaScriptToolRuntime {
     private static let banner = """
     globalThis.cua = {
       call: function (tool, args) {
+        // A fact an earlier validate() named turned out false: the program stops here.
+        var failedValidation = __ocuValidationFailure();
+        if (failedValidation) { throw new Error(failedValidation); }
         var raw = __ocuCall(tool, JSON.stringify(args || {}));
         var res = JSON.parse(raw);
         if (res.isError) { throw new Error(res.text || ('tool error: ' + tool)); }
@@ -466,6 +501,22 @@ final class JavaScriptToolRuntime {
       _byRole: function (list) { return typeof list[0] === 'string'; },
       _byShape: function (list) { return typeof list[0] === 'string' && list.length > 1 && typeof list[1] !== 'object'; },
       _byPair: function (list) { return typeof list[0] === 'string' && list.length > 1; },
+      // validate(fact): what must be true on the screen after the step before it. It does not
+      // wait: a checker judges it in the background, and a fact found false stops the program
+      // at its next call with an error that names the fact.
+      validate: function () {
+        var a = this._split(arguments, this._byPair);
+        __ocuValidate(a.app, String(a.rest[0]));
+      },
+      // controls(): every control of the window a person could act on now, as query records
+      // (index, role, subrole, title, value, state, in), each ready for click/setValue by index.
+      // For a caller that must choose among all of them; the host's helper reads it.
+      controls: function () {
+        var a = this._split(arguments, this._byRole);
+        var found = JSON.parse(__ocuControls(a.app));
+        if (found.error) { throw new Error(found.error); }
+        return found.controls;
+      },
       listApps: function () { return this.call('list_apps', {}).text; },
       getAppState: function () { var a = this._split(arguments, this._byRole); return this.call('get_app_state', Object.assign({ app: a.app }, a.rest[0] || {})).text; },
       screenshot: function () { return this.getAppState.apply(this, arguments); },

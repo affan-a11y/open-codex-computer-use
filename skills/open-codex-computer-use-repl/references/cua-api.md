@@ -48,8 +48,12 @@ optional), `within` (above), `limit` (default 20), `max_nodes` (default 5000),
 {
   index: number,        // pass as element_index, or pass the element itself
   role: string,         // e.g. "AXButton", "AXTextField"
-  title?: string,       // visible label
+  subrole?: string,     // the kind of its role: "AXCloseButton", "AXSearchField", "AXOutlineRow"
+  title?: string,       // its name; a row or cell with no name of its own gets the words inside it, a field its identifier
   value?: string,       // current value/text
+  help?: string,        // its tooltip, when that is not already the title
+  state?: string[],     // what holds now, of: "selected", "expanded", "focused", "disabled"
+  in?: string,          // the nearest named thing around it: "outline sidebar", "dialog Save as"
   identifier?: string,
   bounds?: { x, y, w, h },
   actions?: string[]    // secondary action names
@@ -69,6 +73,16 @@ key press or click that changes the screen.
 The first candidate present, polled like `waitFor`. Records carry `which`, the
 candidate's position. `[]` when none came. One call for "the Compose button, or
 the New message item, or the Send field".
+
+### `cua.validate(fact)`
+Say what must be true on the screen after the step just written, in one short
+sentence: `cua.validate("The chart shows the 1 hour timeframe")`. It never waits: a
+checker reads the window and judges the fact in the background while the program
+goes on. A fact found false is judged once more on a newer read; false again, the
+next `cua` call (or the program's end) throws an error that names the fact. Use it
+where a control cannot tell you: after a step whose result is a state of the
+screen, not a control to wait for. One fact a call, nothing that only holds for a
+moment.
 
 ### `cua.sleep(ms)`
 Pause the program up to 10 s.

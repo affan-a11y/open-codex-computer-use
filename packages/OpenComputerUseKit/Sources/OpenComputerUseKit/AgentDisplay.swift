@@ -57,6 +57,9 @@ final class AgentDisplay: @unchecked Sendable {
     /// OPEN_COMPUTER_USE_AGENT_DISPLAY=off: no display is made and a prepared window is driven
     /// where it sits, on the person's own screen.
     static let off = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_AGENT_DISPLAY"] == "off"
+    /// OPEN_COMPUTER_USE_KEEP_OPENED_WINDOWS=1: a window the agent opened goes home at restore
+    /// instead of being closed, so a person can see what was done in it.
+    static let keepOpenedWindows = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_KEEP_OPENED_WINDOWS"] == "1"
 
     struct ParkedWindow {
         let pid: pid_t
@@ -232,12 +235,21 @@ final class AgentDisplay: @unchecked Sendable {
         if Self.windowFrame(windowID) == nil {
             TimingLog.note("agent_display.restore: window \(windowID) was already gone")
             outcome = .closed
-        } else if close || reopened.remove(windowID) != nil {
+        } else if (close || reopened.remove(windowID) != nil) && !Self.keepOpenedWindows {
             // The mark goes with the press: should the move below fail, a retry only moves, never presses twice.
             guard pressClose(entry.element) else {
                 throw ComputerUseError.stateUnavailable("window \(windowID) has no close button to press")
             }
-            outcome = waitUntil(timeout: Self.moveSettle) { Self.onScreenWindows()[windowID] == nil } != nil ? .closed : .heldOpen
+            // A page may answer the close with a dialog ("Leave site?"): the window is the
+            // agent's own, so the dialog's default button is pressed as soon as it shows and the
+            // close is waited for again. The host gives this process about a second to leave.
+            waitUntil(timeout: Self.moveSettle) {
+                Self.onScreenWindows()[windowID] == nil || self.focusedDialog(pid: entry.pid, other: entry.element) != nil
+            }
+            outcome = Self.onScreenWindows()[windowID] == nil ? .closed : .heldOpen
+            if outcome == .heldOpen, pressDefaultButtonOfDialog(pid: entry.pid, other: entry.element) {
+                outcome = waitUntil(timeout: Self.moveSettle) { Self.onScreenWindows()[windowID] == nil } != nil ? .closed : .heldOpen
+            }
         }
         if outcome != .closed {
             try setAXPosition(entry.element, entry.originalPosition)
@@ -250,6 +262,34 @@ final class AgentDisplay: @unchecked Sendable {
         reopened.remove(windowID)
         TimingLog.log("agent_display.restore", since: start)
         return outcome
+    }
+
+    /// The app's focused window when it is a dialog or sheet other than `other`.
+    private func focusedDialog(pid: pid_t, other: AXUIElement) -> AXUIElement? {
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let focused, !CFEqual(focused, other) else { return nil }
+        let window = focused as! AXUIElement
+        var subrole: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role)
+        let isDialog = (subrole as? String) == (kAXDialogSubrole as String) || (role as? String) == (kAXSheetRole as String)
+        return isDialog ? window : nil
+    }
+
+    /// Press the default button of the app's focused dialog, when there is one. False when
+    /// there is no such dialog or button, or the press was refused.
+    private func pressDefaultButtonOfDialog(pid: pid_t, other: AXUIElement) -> Bool {
+        guard let dialog = focusedDialog(pid: pid, other: other) else { return false }
+        var button: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(dialog, kAXDefaultButtonAttribute as CFString, &button) == .success, let button else {
+            TimingLog.note("agent_display.restore: the dialog has no default button")
+            return false
+        }
+        let pressed = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+        TimingLog.note("agent_display.restore: pressed the dialog's default button (\(pressed.rawValue))")
+        return pressed == .success
     }
 
     /// Press a window's close button. False when it has none or the press was refused.

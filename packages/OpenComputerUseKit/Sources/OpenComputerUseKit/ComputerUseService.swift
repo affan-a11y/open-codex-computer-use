@@ -1059,6 +1059,68 @@ public final class ComputerUseService {
         return (records, result.digest)
     }
 
+    /// The window's text as it is now, one line per node: what `cua.validate` shows its checker.
+    /// A targeted walk: no snapshot, no picture, and no element is registered.
+    public func windowText(app query: String) throws -> String {
+        let app = try AppDiscovery.resolve(query, activate: false)
+        let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: preparedWindows[query.lowercased()])
+        let everyNode = TargetedAX.Criteria(text: nil, exact: false, role: nil, limit: 1500, maxNodes: 5000)
+        let found = SnapshotBuilder.targetedSearch(everyNode, in: context)
+        let lines = found.records.map { record in
+            let words = [record.role, record.title, record.value] + record.details.state
+            return words
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The actions that mean "a person can act on this". Not AXShowMenu: a browser offers a
+    /// context menu on every node of a page.
+    private static let actingActions: Set<String> = ["AXPress", "AXPick", "AXConfirm", "AXOpen", "AXIncrement", "AXDecrement"]
+    private static let editableRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    /// The window's own buttons end the work instead of doing it.
+    private static let windowButtons: Set<String> = ["AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"]
+
+    /// Every control of the window a person could act on now, as query records, each
+    /// registered so its `index` can be acted on. For a caller that must choose among all of them.
+    public func controls(app query: String) throws -> [[String: Any]] {
+        let app = try AppDiscovery.resolve(query, activate: false)
+        let context = try SnapshotBuilder.resolveTargetWindow(for: app, windowID: preparedWindows[query.lowercased()])
+        // Every node the walk reaches: a control near the end of a page is still a control.
+        let everyNode = TargetedAX.Criteria(text: nil, exact: false, role: nil, limit: 5000, maxNodes: 5000)
+        let found = SnapshotBuilder.targetedSearch(everyNode, in: context)
+        var placesTaken: Set<String> = []
+        return found.records
+            .filter(Self.canBeActedOn)
+            .compactMap { record -> [String: Any]? in
+                let control = registerTargetedElement(record: record, context: context)
+                let name = control["title"] as? String ?? ""
+                guard !name.isEmpty || Self.isField(record) else { return nil }  // a text area may have no name at all
+                // One control, one record: a page wraps a field in a group that carries its name.
+                let place = record.localFrame.map { "\(name)@\(Int($0.minX)),\(Int($0.minY)),\(Int($0.width))x\(Int($0.height))" } ?? name
+                return placesTaken.insert(place).inserted ? control : nil
+            }
+    }
+
+    private static func isField(_ record: ElementRecord) -> Bool {
+        record.role.map(editableRoles.contains) ?? false
+    }
+
+    private static func readName(of record: ElementRecord) -> String? {
+        if isField(record) { return record.identifier }
+        if record.role == kAXStaticTextRole as String, let text = record.value, !text.isEmpty { return text }
+        return record.element.flatMap(SnapshotBuilder.textInside)
+    }
+
+    /// What a person can act on: a field, or what the app says takes an action.
+    private static func canBeActedOn(_ record: ElementRecord) -> Bool {
+        guard let frame = record.localFrame, !frame.isEmpty, !record.details.state.contains("disabled") else { return false }
+        if let subrole = record.details.subrole, windowButtons.contains(subrole) { return false }
+        return isField(record) || record.rawActions.contains(where: actingActions.contains)
+    }
+
     /// A snapshot carrying real window context but no rendered tree or screenshot,
     /// so the existing action internals run unchanged against targeted elements.
     private func liteSnapshot(context: TargetedAX.WindowContext, elements: [Int: ElementRecord]) -> AppSnapshot {
@@ -1082,6 +1144,13 @@ public final class ComputerUseService {
     private func registerTargetedElement(record source: ElementRecord, context: TargetedAX.WindowContext) -> [String: Any] {
         targetedIndexCounter += 1
         let index = targetedIndexCounter
+        var details = source.details
+        details.container = source.element.flatMap(SnapshotBuilder.namedContainer)
+        // A text's name is its text. A row or cell holds its name in its children. A field holds
+        // what was typed, which is not its name: its identifier is the one word about it that
+        // stays as the page changes.
+        let ownTitle = source.title.flatMap { $0.isEmpty ? nil : $0 }
+        let title = ownTitle ?? Self.readName(of: source)
         // Re-key the record to its assigned public index so lookups match.
         let record = ElementRecord(
             index: index,
@@ -1089,11 +1158,12 @@ public final class ComputerUseService {
             element: source.element,
             localFrame: source.localFrame,
             role: source.role,
-            title: source.title,
+            title: title,
             value: source.value,
             rawActions: source.rawActions,
             prettyActions: source.prettyActions,
-            isSyntheticText: source.isSyntheticText
+            isSyntheticText: source.isSyntheticText,
+            details: details
         )
         targetedElements[index] = TargetedElement(record: record, context: context)
         targetedElementOrder.append(index)
@@ -1114,6 +1184,10 @@ public final class ComputerUseService {
             dict["bounds"] = ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height]
         }
         if !record.prettyActions.isEmpty { dict["actions"] = record.prettyActions }
+        if let subrole = record.details.subrole, !subrole.isEmpty { dict["subrole"] = subrole }
+        if let help = record.details.help, !help.isEmpty, help != record.title { dict["help"] = help }
+        if !record.details.state.isEmpty { dict["state"] = record.details.state }
+        if let container = record.details.container { dict["in"] = container }
         return dict
     }
 

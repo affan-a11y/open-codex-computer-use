@@ -15,6 +15,9 @@ final class ElementRecord {
     let rawActions: [String]
     let prettyActions: [String]
     let isSyntheticText: Bool
+    /// What a query record says beyond its name, so code can tell a control's condition and
+    /// twins apart without a full read. Set on targeted records only.
+    let details: ElementDetails
 
     init(
         index: Int,
@@ -26,8 +29,10 @@ final class ElementRecord {
         value: String? = nil,
         rawActions: [String],
         prettyActions: [String],
-        isSyntheticText: Bool = false
+        isSyntheticText: Bool = false,
+        details: ElementDetails = ElementDetails()
     ) {
+        self.details = details
         self.index = index
         self.identifier = identifier
         self.element = element
@@ -39,6 +44,17 @@ final class ElementRecord {
         self.prettyActions = prettyActions
         self.isSyntheticText = isSyntheticText
     }
+}
+
+struct ElementDetails {
+    /// What kind of its role it is, when the app says: AXCloseButton, AXSearchField.
+    var subrole: String?
+    /// The control's tooltip.
+    var help: String?
+    /// The conditions that hold now, in plain words: selected, expanded, focused, disabled.
+    var state: [String] = []
+    /// The nearest thing around it that has a name: "dialog Save as", "toolbar Drawing".
+    var container: String?
 }
 
 enum SnapshotMode {
@@ -2490,7 +2506,10 @@ extension SnapshotBuilder {
             windowElement: rootWindow,
             windowID: meta?.windowID ?? axWindowID,
             windowLayer: meta?.layer,
-            windowBounds: meta?.bounds,
+            // The window's frame as the app reports it: element frames come from the same
+            // source, and the window server reports a window on another Space at a frame
+            // that is not the app's.
+            windowBounds: resolveLocalFrame(of: rootWindow, windowBounds: nil) ?? meta?.bounds,
             focusedElement: focusedElement
         )
     }
@@ -2500,7 +2519,7 @@ extension SnapshotBuilder {
     static func currentGeometry(of record: ElementRecord, in context: TargetedAX.WindowContext) -> (TargetedAX.WindowContext, ElementRecord) {
         var context = context
         if let meta = WindowCapture.resolve(for: context.app.pid, exactWindowID: context.windowID, capture: false) {
-            context.windowBounds = meta.bounds
+            context.windowBounds = resolveLocalFrame(of: context.windowElement, windowBounds: nil) ?? meta.bounds
             context.windowLayer = meta.layer
         }
         guard let element = record.element, let frame = resolveLocalFrame(of: element, windowBounds: context.windowBounds) else {
@@ -2509,7 +2528,8 @@ extension SnapshotBuilder {
         let fresh = ElementRecord(
             index: record.index, identifier: record.identifier, element: element, localFrame: frame,
             role: record.role, title: record.title, value: record.value,
-            rawActions: record.rawActions, prettyActions: record.prettyActions, isSyntheticText: record.isSyntheticText
+            rawActions: record.rawActions, prettyActions: record.prettyActions, isSyntheticText: record.isSyntheticText,
+            details: record.details
         )
         return (context, fresh)
     }
@@ -2525,10 +2545,16 @@ extension SnapshotBuilder {
         }
     }
 
+    /// The app's window with this id: from its window list, or its focused window, which the
+    /// app still names for a window on another Space when the list comes back empty.
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
-        copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
+        let listed = copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
             SkyLightSPI.shared.windowID(for: $0) == windowID
         }
+        if let listed { return listed }
+        guard let focused = copyElement(appElement, attribute: kAXFocusedWindowAttribute),
+              SkyLightSPI.shared.windowID(for: focused) == windowID else { return nil }
+        return focused
     }
 
     // Attributes read for every visited node, in one batched IPC call. Position
@@ -2544,6 +2570,11 @@ extension SnapshotBuilder {
         kAXSizeAttribute as String,
         "AXPlaceholderValue",
         kAXSubroleAttribute as String,
+        kAXHelpAttribute as String,
+        kAXSelectedAttribute as String,
+        kAXExpandedAttribute as String,
+        kAXFocusedAttribute as String,
+        kAXEnabledAttribute as String,
     ]
 
     /// Find controls in the target window matching `criteria`. Tries the app's
@@ -2554,7 +2585,7 @@ extension SnapshotBuilder {
     /// AXUIElement references and window-local frames, so the caller can act on
     /// them without any snapshot.
     static func targetedSearch(_ criteria: TargetedAX.Criteria, in context: TargetedAX.WindowContext) -> TargetedAX.SearchResult {
-        let limit = max(1, min(criteria.limit, 100))
+        let limit = max(1, criteria.limit)  // the walk is bounded by maxNodes; a page has more than 100 controls
         var windowElement = context.windowElement
         if let scope = criteria.within {
             let found = container(scope, in: windowElement, budget: max(1, criteria.maxNodes))
@@ -2722,17 +2753,69 @@ extension SnapshotBuilder {
         let placeholder: String?
         /// The tree prints "search text field" off this, so a role criteria may name it.
         let subrole: String?
+        let help: String?
+        /// The conditions that hold now, in plain words.
+        let state: [String]
     }
 
     private static func batchScan(_ element: AXUIElement) -> NodeScan {
         let raw = copyAttributeValues(of: element, attributes: searchScanAttributes)
         func str(_ i: Int) -> String? { raw[i] as? String }
+        func flag(_ i: Int) -> Bool? { raw[i] as? Bool }
+        var state: [String] = []
+        if flag(10) == true { state.append("selected") }
+        if flag(11) == true { state.append("expanded") }
+        if flag(12) == true { state.append("focused") }
+        if flag(13) == false { state.append("disabled") }
         return NodeScan(
             role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),
             globalFrame: axFrame(position: raw[5], size: raw[6]),
             placeholder: str(7),
-            subrole: str(8)
+            subrole: str(8),
+            help: str(9),
+            state: state
         )
+    }
+
+    /// The words a person reads on a control that has no name of its own: a row, a cell, a
+    /// group whose text sits in its children. Read in order, until a name's length is reached.
+    static func textInside(_ element: AXUIElement) -> String? {
+        let longestName = 80
+        var words: [String] = []
+        var pending = copyArray(element, attribute: kAXChildrenAttribute) ?? []
+        while !pending.isEmpty, words.joined(separator: " ").count < longestName {
+            let node = pending.removeFirst()
+            let text = stringValue(of: node, attribute: kAXValueAttribute)
+                ?? stringValue(of: node, attribute: kAXTitleAttribute)
+                ?? ""
+            if !text.isEmpty {
+                words.append(text)
+            }
+            pending = (copyArray(node, attribute: kAXChildrenAttribute) ?? []) + pending
+        }
+        let name = words.joined(separator: " ")
+        return name.isEmpty ? nil : String(name.prefix(longestName))
+    }
+
+    /// The nearest ancestor with a name of its own, as "role name". The walk ends at the window.
+    /// It costs a few reads per ancestor, so only a record handed to code gets it.
+    static func namedContainer(of element: AXUIElement) -> String? {
+        var current = element
+        while let parent = copyElement(current, attribute: kAXParentAttribute) {
+            let role = stringValue(of: parent, attribute: kAXRoleAttribute) ?? ""
+            if role == kAXWindowRole as String || role == kAXApplicationRole as String {
+                return nil
+            }
+            let title = stringValue(of: parent, attribute: kAXTitleAttribute) ?? ""
+            let description = stringValue(of: parent, attribute: kAXDescriptionAttribute) ?? ""
+            let name = title.isEmpty ? description : title
+            if !name.isEmpty {
+                let roleWords = stringValue(of: parent, attribute: kAXRoleDescriptionAttribute) ?? role
+                return "\(roleWords) \(name)"
+            }
+            current = parent
+        }
+        return nil
     }
 
     private static func axFrame(position: AnyObject?, size: AnyObject?) -> CGRect? {
@@ -2765,10 +2848,11 @@ extension SnapshotBuilder {
             element: element,
             localFrame: localFrame,
             role: scan.role,
-            title: title ?? [scan.title, scan.description, scan.placeholder].compactMap { $0 }.first { !$0.isEmpty },
+            title: title ?? [scan.title, scan.description, scan.placeholder, scan.help].compactMap { $0 }.first { !$0.isEmpty },
             value: scan.value.map { $0.count > defaultTextLimit ? String($0.prefix(defaultTextLimit)) : $0 },
             rawActions: rawActions,
-            prettyActions: scan.role.map { meaningfulActions(rawActions, role: $0) } ?? rawActions
+            prettyActions: scan.role.map { meaningfulActions(rawActions, role: $0) } ?? rawActions,
+            details: ElementDetails(subrole: scan.subrole, help: scan.help, state: scan.state)
         )
     }
 
