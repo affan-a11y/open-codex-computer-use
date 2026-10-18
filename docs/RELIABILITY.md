@@ -21,6 +21,7 @@
 - Linux 隐藏控件实测：`bash scripts/run-linux-read-back-smoke.sh /path/to/linux/open-computer-use --hidden-checks`，在私有 D-Bus / Xvfb 中验证真实 GTK 隐藏状态、属性读取、索引及页面切换；依赖与范围见 [测试说明](linux-hidden-details.md)。
 - Linux 按需观察实测：`bash scripts/run-linux-read-back-smoke.sh /path/to/linux/open-computer-use --observation-checks`，验证真实 GTK 采集通道、native MCP / Worker JS 输出、旧索引拒绝与恢复；另外需要 Node.js，见 [测试说明](selective-observation.md)。
 - Windows runtime：`(cd apps/OpenComputerUseWindows && go test ./...)`、`./scripts/build-open-computer-use-windows.sh --arch amd64`；截图相关变更还要在 Windows 交互桌面验证正常窗口有 image、1x1/minimized/cloaked 窗口无 image。
+- Windows 输入实测：`pwsh -File scripts/tests/windows-input-smoke.ps1 -NativePath /path/to/open-computer-use.exe`，验证真实默认滚动回退、四向物理滚轮、截图坐标点击、拖拽、组合键、移动 / 遮挡拒绝及 Worker JS；记录实际 DPI，见 [说明](windows-input.md)。
 - Windows 观察实测：`pwsh -File scripts/tests/windows-observation-smoke.ps1 -NativePath /path/to/open-computer-use.exe`，使用独立 WPF 窗口走真实 UIA / native MCP，验证采集开关、索引与截图边界；专用 PR 工作流见 [CI 说明](CICD.md)。
 - 本地诊断：
   - `open-computer-use doctor`

@@ -5,6 +5,9 @@ on:
     paths:
       - 'apps/OpenComputerUseWindows/**'
       - 'scripts/tests/windows-observation*'
+      - 'scripts/tests/windows-input*'
+      - 'scripts/tests/windows-fixture-state.ps1'
+      - 'scripts/tests/fixtures/WindowsInputFixture.ps1'
       - 'scripts/tests/fixtures/WindowsObservationFixture.ps1'
       - '.github/workflows/windows-observation.yml'
   workflow_dispatch:
@@ -43,5 +46,11 @@ jobs:
         run: |
           powershell.exe -NoProfile -NonInteractive -File ./scripts/tests/windows-observation.test.ps1 -RuntimePath apps/OpenComputerUseWindows/runtime.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: PowerShell input guards and cleanup
+        run: |
+          powershell.exe -NoProfile -NonInteractive -File ./scripts/tests/windows-input.test.ps1 -RuntimePath apps/OpenComputerUseWindows/runtime.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real WPF and native MCP
         run: ./scripts/tests/windows-observation-smoke.ps1 -NativePath "$env:RUNNER_TEMP/ocu-observation.exe"
+      - name: Real Windows scroll, DPI and physical input
+        run: ./scripts/tests/windows-input-smoke.ps1 -NativePath "$env:RUNNER_TEMP/ocu-observation.exe"

@@ -63,6 +63,13 @@ Disabling both channels is rejected before a native call. These options do not
 deduplicate unchanged images. See [selective observation](../selective-observation.md)
 for collection semantics and real GTK/Worker validation.
 
+On Windows, explicit `app.pressKey("ctrl+a", {keyMethod:"global"})` uses
+physical SendInput keys and requires `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1`.
+Auto key delivery remains window messages even with this flag enabled. Explicit
+app_post clicks remain window messages too. Global input may activate the target
+and move the system pointer; stale geometry, occlusion and foreground failures
+are refused. See [Windows input](../windows-input.md) for routing and desktop tests.
+
 On macOS, `selectText` selects exact text inside a text element. `prefix` and `suffix`
 match the immediately adjacent text to disambiguate repeated occurrences. `selection`
 is `text` (default), `cursor_before` or `cursor_after`. Snapshot and `query` indexes

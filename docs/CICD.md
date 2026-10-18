@@ -19,9 +19,9 @@
 
 所有 GitHub Actions 都已经 pin 到 commit SHA。后续升级 action 时，也要继续保持这个约束。
 
-## Windows 观察回归
+## Windows 观察与输入回归
 
-`.github/workflows/windows-observation.yml` 在相关 PR 上运行 Windows Go 测试、PowerShell 生产采集函数测试，以及独立 WPF / native MCP smoke，也支持手动触发。工作流仅需 `contents: read`，沿用固定 SHA 的 checkout / setup-node / setup-go，不发布制品。桌面 smoke 使用自己的窗口，验证采集开关、索引与 UIA 设值，以及正常 / 1x1 / 最小化 / cloaked 窗口的截图边界。复现命令见 [按需观察](selective-observation.md)。
+`.github/workflows/windows-observation.yml` 在相关 PR 上运行 Windows Go 测试、PowerShell 生产采集函数测试，以及独立 WPF / native MCP smoke，也支持手动触发。工作流仅需 `contents: read`，沿用固定 SHA 的 checkout / setup-node / setup-go，不发布制品。桌面 smoke 使用自己的窗口，验证采集开关、索引与 UIA 设值，以及正常 / 1x1 / 最小化 / cloaked 窗口的截图边界。输入回归另外验证默认窗口消息滚动、四向物理滚轮、点击 / 拖拽 / 组合键和 stale / 遮挡拒绝，并运行 PowerShell 故障注入测试检查释放保护。复现命令见 [按需观察](selective-observation.md)与 [Windows 输入](windows-input.md)。
 
 ## 推荐接入顺序
 

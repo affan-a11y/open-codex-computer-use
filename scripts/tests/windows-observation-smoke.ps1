@@ -1,5 +1,6 @@
 param([Parameter(Mandatory = $true)][string]$NativePath)
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-fixture-state.ps1")
 if ($env:OS -ne "Windows_NT") { throw "Windows desktop required" }
 $NativePath = (Resolve-Path -LiteralPath $NativePath).Path
 $directory = Join-Path ([System.IO.Path]::GetTempPath()) ("ocu-observation-" + [Guid]::NewGuid())
@@ -19,7 +20,7 @@ function Wait-For($test, $description) {
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Timeout: $description"
 }
-function Read-State { [System.IO.File]::ReadAllText($stateFile) | ConvertFrom-Json }
+function Read-State { Read-WindowsFixtureState $stateFile }
 function Send-Request($method, $parameters) {
     $script:requestId += 1
     $message = @{ jsonrpc = "2.0"; id = $script:requestId; method = $method; params = $parameters }

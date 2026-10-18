@@ -148,6 +148,7 @@ test("app-bound API forwards background-operation options", async () => {
     await backgroundApp.getAXStateAndScreenshot({ emit: false, windowPlacement: "restore" });
     await backgroundApp.typeText("hello", { keyMethod: "sky_key" });
     await backgroundApp.pressKey("cmd+a", { keyMethod: "sky_key" });
+    await backgroundApp.pressKey("ctrl+a", { keyMethod: "global" });
   `);
 
   assert.equal(result.isError, false);
@@ -176,6 +177,10 @@ test("app-bound API forwards background-operation options", async () => {
   assert.deepEqual(native.calls[5], {
     name: "press_key",
     arguments: { app: "Text", key: "cmd+a", key_method: "sky_key" },
+  });
+  assert.deepEqual(native.calls[6], {
+    name: "press_key",
+    arguments: { app: "Text", key: "ctrl+a", key_method: "global" },
   });
 });
 
