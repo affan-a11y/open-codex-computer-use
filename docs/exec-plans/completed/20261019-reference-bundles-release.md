@@ -29,5 +29,13 @@
 - [x] 核实干净 main 与远端一致；本地 ZIP 完整，备份哈希校验通过。
 - [x] 确认 ZIP 只用于研究参考、不接入默认构建，制定固定 URL 与独立归档 tag。
 - [x] 完成文档与 Git 跟踪迁移；文档骨架与 diff 检查通过，本地 ZIP 命中忽略规则。
-- [ ] 发布并校验 Release 附件。
-- [ ] 同步远端 main，验证干净克隆并记录 history。
+- [x] 发布 `reference-bundles` pre-release，两个 ZIP 与校验清单上传完成，正式 latest 保持 `v1.1.2`。
+- [x] 无认证访问公开固定 URL，两个 ZIP 下载后的 SHA-256 与原清单一致，ZIP 完整性检查通过；Release 的校验清单与仓库文件字节一致。
+- [x] 同步并推送远端 main；从公开 HTTPS 地址执行启用 Git LFS、未跳过 smudge 的完整历史 clone，正常检出，当前 tree 没有 LFS 文件，也没有自动下载参考 ZIP。
+- [x] 文档骨架与 diff 检查通过，补充 history 并归档此计划。
+
+## 交付
+
+- 归档 Release：<https://github.com/iFurySt/open-computer-use/releases/tag/reference-bundles>
+- 固定附件 URL：`https://github.com/iFurySt/open-computer-use/releases/download/reference-bundles/<filename>`
+- `main` 使用普通提交完成迁移，本地原始 ZIP 继续作为忽略文件保留；没有改写历史或调整付费预算。

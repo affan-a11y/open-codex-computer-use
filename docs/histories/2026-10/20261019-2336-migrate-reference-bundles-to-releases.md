@@ -30,10 +30,13 @@ ZIP 只用于逆向研究与版本比较，不参与默认构建。按需下载 
 - `docs/references/codex-computer-use-reverse-engineering/background-click-free-tooling.md`
 - `docs/releases/RELEASE_GUIDE.md`
 - `docs/releases/reference-bundles.md`
-- `docs/exec-plans/active/20261019-reference-bundles-release.md`
+- `docs/exec-plans/completed/20261019-reference-bundles-release.md`
 
 ### Validation
 
 - 本地原始 ZIP 和独立备份均通过原有 SHA-256 清单校验；两个 ZIP 均通过完整性检查。
 - 文档骨架检查和 diff 空白检查通过；ZIP 从 index 移除，保留的本地 ZIP 命中忽略规则。
-- Release 上传、公开 URL 下载及远端 main 克隆验证待完成后补充。
+- `reference-bundles` Release 的三个附件均上传完成，服务端 SHA-256 与本地文件一致；归档为 pre-release，正式 latest 仍是 `v1.1.2`。
+- 无认证访问三个公开固定下载 URL 成功；两个 ZIP 下载后通过原有 SHA-256 清单与完整性检查，Release 中的校验清单与仓库文件字节一致。
+- 迁移已推送到 `main`；从 GitHub 公开 HTTPS 地址完整 clone，在启用 Git LFS、未跳过 smudge 的条件下正常检出，工作区干净，当前 tree 没有 LFS 文件或原始参考 ZIP。
+- 新克隆内的文档骨架检查通过。此任务只修改制品分发与文档，没有修改应用实现。
