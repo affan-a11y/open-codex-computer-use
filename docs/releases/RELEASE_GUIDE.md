@@ -37,6 +37,16 @@ publisher 即使已绑定仓库不可变身份、页面仍显示 Valid，也不�
 - GitHub Release 正文：`docs/releases/github/vX.Y.Z.md`
 - GitHub Release 页面：workflow 使用审核过的英文 notes 文件创建或更新，不直接引用 PR 标题自动生成正文。
 
+## 参考资料归档 Release
+
+官方 `computer-use` 原始 ZIP 使用独立的 `reference-bundles` tag / Release 分发，下载入口为 `https://github.com/iFurySt/open-computer-use/releases/download/reference-bundles/<filename>`。它只归档研究输入，不属于下面的 patch / minor 软件发版流程，不 bump plugin / npm / App 版本。
+
+- 标记为 pre-release，并显式设置 `--latest=false`，保持正式版本的 latest 下载入口。
+- tag 使用不匹配 `v*` 或 `*.*.*` 的固定名称 `reference-bundles`，避免触发应用与 npm release workflow。
+- 每个附件先校验 SHA-256 和 ZIP 完整性，上传后从公开固定 URL 重新下载并验证；发布说明使用英文。
+- 保留已发布 tag 与文件名，不覆盖既有版本附件；新增版本使用新的文件名，并同步仓库内的下载说明、`SHA256SUMS` 和 Release 中的校验清单。
+- 仓库不再跟踪这些 ZIP 或其 LFS 指针。目录说明见[官方参考包](../references/codex-computer-use-reverse-engineering/assets/official-bundles/computer-use/README.md)。
+
 ## 当前版本源
 
 这个仓库当前有三类 release 版本源：
